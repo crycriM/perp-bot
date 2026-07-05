@@ -1,0 +1,5 @@
+mm_core
+aiohttp>=3.9.0
+
+[dev]
+pytest>=7.4.0

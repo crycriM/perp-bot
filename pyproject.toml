@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "perp_bot"
+version = "0.1.0"
+description = "Perp CLOB market-making bot using mm_core brain"
+requires-python = ">=3.11"
+dependencies = [
+    "mm_core",
+    "aiohttp>=3.9.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

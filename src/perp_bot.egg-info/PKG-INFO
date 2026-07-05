@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: perp_bot
+Version: 0.1.0
+Summary: Perp CLOB market-making bot using mm_core brain
+Requires-Python: >=3.11
+Requires-Dist: mm_core
+Requires-Dist: aiohttp>=3.9.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4.0; extra == "dev"

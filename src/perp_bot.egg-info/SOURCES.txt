@@ -1,0 +1,14 @@
+pyproject.toml
+src/perp_bot/__init__.py
+src/perp_bot/backtest.py
+src/perp_bot/config.py
+src/perp_bot/keeper.py
+src/perp_bot/opms_client.py
+src/perp_bot.egg-info/PKG-INFO
+src/perp_bot.egg-info/SOURCES.txt
+src/perp_bot.egg-info/dependency_links.txt
+src/perp_bot.egg-info/requires.txt
+src/perp_bot.egg-info/top_level.txt
+tests/test_backtest.py
+tests/test_keeper.py
+tests/test_opms_client.py
