@@ -1,18 +1,12 @@
 import asyncio
+import dataclasses
 import logging
-import time
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
-
-@dataclass
-class Intent:
-    id: str
-    target_inventory: float
-    quote: dict | None = None
-    urgency: str = "normal"
 
 @dataclass
 class Position:
@@ -21,23 +15,31 @@ class Position:
     equity: float
 
 class OpmsClient:
-    """REST + WS client for the OPMS with reconnect and resnapshot-on-reconnect."""
+    """REST + WS client for the OPMS with reconnect and resnapshot-on-reconnect.
 
-    def __init__(self, base_url: str, ws_url: str, api_key: str, pair_config):
+    Talks to the real Stream B4 surface: GET /positions/{exchange}/{symbol},
+    GET /accounts/{exchange}/{account_id}/equity, and the two egress
+    websockets /ws/md/{exchange}/{symbol} (market data) and
+    /ws/fills/{exchange} (fills, venue-scoped so filtered by symbol here).
+    """
+
+    def __init__(self, base_url: str, ws_base_url: str, exchange: str, coin: str,
+                 api_key: str, pair_config, account_id: str = "default"):
         self.base_url = base_url
-        self.ws_url = ws_url
+        self.ws_base_url = ws_base_url
+        self.exchange = exchange
+        self.coin = coin
+        self.symbol = f"{coin}-USD"
+        self.account_id = account_id
         self.api_key = api_key
         self.pair_config = pair_config
         self._session: aiohttp.ClientSession | None = None
-        self._ws = None
-        self._task: asyncio.Task | None = None
+        self._md_task: asyncio.Task | None = None
+        self._fills_task: asyncio.Task | None = None
         self._on_snapshot_cb = None
         self._on_fill_cb = None
         self._on_error_cb = None
         self._positions: dict[str, Position] = {}
-        self._intents: dict[str, Intent] = {}
-        self._snapshots: list = []
-        self._fills: list = []
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -46,37 +48,38 @@ class OpmsClient:
             )
         return self._session
 
-    async def send_intent(self, intent: Intent) -> dict:
+    async def send_intent(self, intent) -> dict:
+        """POST an mm_core ExecIntent to the OPMS intent endpoint."""
         session = await self._get_session()
-        payload = {
-            "id": intent.id,
-            "target_inventory": intent.target_inventory,
-            "quote": intent.quote,
-            "urgency": intent.urgency,
-        }
-        async with session.post(f"{self.base_url}/api/intents", json=payload) as resp:
+        payload = dataclasses.asdict(intent)
+        if not payload.get("client_id"):
+            payload["client_id"] = f"{intent.venue}:{intent.coin}:{uuid.uuid4().hex[:12]}"
+        async with session.post(f"{self.base_url}/api/v1/intents", json=payload) as resp:
             return await resp.json()
 
-    async def get_positions(self) -> dict[str, Position]:
+    async def _get_equity(self) -> float:
         session = await self._get_session()
-        async with session.get(f"{self.base_url}/api/positions") as resp:
+        url = f"{self.base_url}/api/v1/accounts/{self.exchange}/{self.account_id}/equity"
+        async with session.get(url) as resp:
             data = await resp.json()
-            self._positions = {
-                p["coin"]: Position(coin=p["coin"], position=p["position"], equity=p["equity"])
-                for p in data
-            }
-            return self._positions
+            return float(data["equity"])
 
-    async def get_intent(self, intent_id: str) -> Intent:
+    async def get_positions(self) -> dict[str, Position]:
+        """Authoritative single-symbol position + equity, keyed by coin."""
         session = await self._get_session()
-        async with session.get(f"{self.base_url}/api/intents/{intent_id}") as resp:
+        url = (f"{self.base_url}/api/v1/positions/{self.exchange}/{self.symbol}"
+               f"?account_id={self.account_id}")
+        async with session.get(url) as resp:
+            if resp.status == 404:
+                self._positions = {}
+                return self._positions
             data = await resp.json()
-            return Intent(
-                id=data["id"],
-                target_inventory=data["target_inventory"],
-                quote=data.get("quote"),
-                urgency=data.get("urgency", "normal"),
-            )
+
+        equity = await self._get_equity()
+        quantity = float(data["quantity"])
+        signed = quantity if data["side"] == "long" else -quantity
+        self._positions = {self.coin: Position(coin=self.coin, position=signed, equity=equity)}
+        return self._positions
 
     def on_snapshot(self, callback):
         self._on_snapshot_cb = callback
@@ -87,48 +90,78 @@ class OpmsClient:
     def on_error(self, callback):
         self._on_error_cb = callback
 
-    async def _ws_loop(self):
+    async def _md_ws_loop(self):
         session = await self._get_session()
+        url = (f"{self.ws_base_url}/ws/md/{self.exchange}/{self.symbol}"
+               f"?account_id={self.account_id}")
         while True:
             try:
-                logger.info("Connecting to OPMS WS")
-                async with session.ws_connect(self.ws_url) as ws:
-                    self._ws = ws
-                    logger.info("OPMS WS connected")
+                logger.info("Connecting to OPMS market-data WS")
+                async with session.ws_connect(url) as ws:
+                    logger.info("OPMS market-data WS connected")
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             data = msg.json()
-                            if data.get("type") == "market_data":
-                                self._snapshots.append(data)
-                                if self._on_snapshot_cb:
-                                    await self._on_snapshot_cb(data)
-                            elif data.get("type") == "fill":
-                                self._fills.append(data)
-                                if self._on_fill_cb:
-                                    await self._on_fill_cb(data)
+                            if data.get("type") == "market_data" and self._on_snapshot_cb:
+                                await self._on_snapshot_cb(data.get("data", {}))
                         elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
                             break
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                logger.error(f"WS error: {e}, reconnecting")
+                logger.error(f"Market-data WS error: {e}, reconnecting")
+                if self._on_error_cb:
+                    await self._on_error_cb(e)
+            await asyncio.sleep(2)
+
+    async def _fills_ws_loop(self):
+        session = await self._get_session()
+        url = f"{self.ws_base_url}/ws/fills/{self.exchange}"
+        while True:
+            try:
+                logger.info("Connecting to OPMS fills WS")
+                async with session.ws_connect(url) as ws:
+                    logger.info("OPMS fills WS connected")
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            data = msg.json()
+                            if data.get("type") == "fill":
+                                fill = data.get("data", {})
+                                # fills WS is venue-scoped (all symbols); filter to ours
+                                if fill.get("coin") == self.symbol and self._on_fill_cb:
+                                    await self._on_fill_cb({
+                                        "ts": float(fill.get("ts", 0.0)),
+                                        "side": fill.get("side"),
+                                        "price": float(fill.get("price", 0.0)),
+                                        "size": float(fill.get("size", 0.0)),
+                                        "fee": float(fill.get("fee", 0.0)),
+                                    })
+                        elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
+                            break
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.error(f"Fills WS error: {e}, reconnecting")
                 if self._on_error_cb:
                     await self._on_error_cb(e)
             await asyncio.sleep(2)
 
     async def start(self):
-        self._task = asyncio.create_task(self._ws_loop())
+        self._md_task = asyncio.create_task(self._md_ws_loop())
+        self._fills_task = asyncio.create_task(self._fills_ws_loop())
         return self
 
     async def stop(self):
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._md_task, self._fills_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._md_task = None
+        self._fills_task = None
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
 
-    async def resnapshot_positions(self):
+    async def resnapshot_positions(self) -> dict[str, Position]:
+        """Re-read authoritative positions (call after reconnect/drift)."""
         logger.info("Resnapshotting positions after reconnect")
-        await self.get_positions()
+        return await self.get_positions()

@@ -10,6 +10,11 @@ class PerpPairConfig:
     coin: str
     gamma: float = 0.5
     kappa: float = 0.3
+    widen_factor: float = 2.0   # half-spread multiplier on WIDEN
+    exchange: str = "hyperliquid"  # OPMS/AccountRegistry/AdapterRegistry routing id;
+                                    # also the ExecIntent.venue and PnLLedger.venue tag
+    account_id: str = "default"
+    funding_interval_s: float = 3600.0  # HL funding cadence; ledger accrues pro-rata
     caps: Caps = None
     gate: GateConfig = None
     risk: RiskConfig = None
