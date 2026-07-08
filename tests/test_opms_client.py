@@ -133,6 +133,7 @@ async def test_send_intent_serializes_exec_intent():
     assert captured["url"].endswith("/api/v1/intents")
     p = captured["payload"]
     assert p["venue"] == "hl" and p["coin"] == "BTC"
+    assert p["account_id"] == "default"
     assert p["current_inventory"] == 2.0
     assert p["quote"]["bid_price"] == 1.0
     assert p["client_id"], "client_id must be generated when missing"
@@ -170,6 +171,110 @@ async def test_md_ws_loop_dispatches_market_data_only():
         pass
 
     assert received == [{"mid": 100.0, "ts": 1.0}]
+
+
+@pytest.mark.asyncio
+async def test_fills_ws_loop_filters_by_symbol_and_account():
+    client = make_client()
+    received = []
+
+    async def on_fill(data):
+        received.append(data)
+
+    client.on_fill(on_fill)
+
+    msg_match = MagicMock(type=aiohttp.WSMsgType.TEXT)
+    msg_match.json.return_value = {
+        "type": "fill",
+        "data": {
+            "coin": "BTC-USD",
+            "account_id": "default",
+            "ts": 1.0,
+            "side": "buy",
+            "price": 100.0,
+            "size": 0.5,
+            "fee": 0.1,
+        },
+    }
+    msg_other_account = MagicMock(type=aiohttp.WSMsgType.TEXT)
+    msg_other_account.json.return_value = {
+        "type": "fill",
+        "data": {
+            "coin": "BTC-USD",
+            "account_id": "other",
+            "ts": 2.0,
+            "side": "sell",
+            "price": 101.0,
+            "size": 0.7,
+            "fee": 0.2,
+        },
+    }
+    msg_missing_account = MagicMock(type=aiohttp.WSMsgType.TEXT)
+    msg_missing_account.json.return_value = {
+        "type": "fill",
+        "data": {
+            "coin": "BTC-USD",
+            "ts": 3.0,
+            "side": "sell",
+            "price": 102.0,
+            "size": 0.8,
+            "fee": 0.3,
+        },
+    }
+    msg_other_symbol = MagicMock(type=aiohttp.WSMsgType.TEXT)
+    msg_other_symbol.json.return_value = {
+        "type": "fill",
+        "data": {
+            "coin": "ETH-USD",
+            "account_id": "default",
+            "ts": 4.0,
+            "side": "sell",
+            "price": 103.0,
+            "size": 0.9,
+            "fee": 0.4,
+        },
+    }
+    msg_close = MagicMock(type=aiohttp.WSMsgType.CLOSED)
+
+    urls = []
+    ws_cm = MagicMock()
+    ws_cm.__aenter__ = AsyncMock(
+        return_value=_AsyncIter([
+            msg_match,
+            msg_other_account,
+            msg_missing_account,
+            msg_other_symbol,
+            msg_close,
+        ])
+    )
+    ws_cm.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = AsyncMock()
+    mock_session.closed = False
+
+    def fake_connect(url):
+        urls.append(url)
+        return ws_cm
+
+    mock_session.ws_connect = fake_connect
+    client._session = mock_session
+
+    task = asyncio.create_task(client._fills_ws_loop())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert urls == ["ws://localhost:8080/ws/fills/hyperliquid?account_id=default"]
+    assert received == [{
+        "ts": 1.0,
+        "side": "buy",
+        "price": 100.0,
+        "size": 0.5,
+        "fee": 0.1,
+    }]
 
 
 class _AsyncIter:

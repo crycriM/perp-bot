@@ -7,6 +7,8 @@ from mm_core.risk_policy import Decision, RiskConfig, RiskPolicy
 from mm_core.regime import GateConfig, Regime, evaluate_regime, should_quote
 from mm_core.as_core import gueant_half_spread, gueant_reservation_price
 from mm_core.vol import VOLATILITY_MODELS
+from perp_bot.topology import validate_account_topology
+from perp_bot.venue_capabilities import VenueCapabilities, get_venue_capabilities
 
 __all__ = [
     "ExecIntent", "MarketSnapshot", "QuoteSpec",
@@ -16,4 +18,6 @@ __all__ = [
     "GateConfig", "Regime", "evaluate_regime", "should_quote",
     "gueant_half_spread", "gueant_reservation_price",
     "VOLATILITY_MODELS",
+    "VenueCapabilities", "get_venue_capabilities",
+    "validate_account_topology",
 ]

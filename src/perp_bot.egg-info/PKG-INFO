@@ -7,3 +7,5 @@ Requires-Dist: mm_core
 Requires-Dist: aiohttp>=3.9.0
 Provides-Extra: dev
 Requires-Dist: pytest>=7.4.0; extra == "dev"
+Provides-Extra: fetch
+Requires-Dist: hyperliquid-python-sdk>=0.4.0; extra == "fetch"

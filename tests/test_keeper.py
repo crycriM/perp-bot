@@ -95,7 +95,9 @@ async def test_keeper_intents_use_configured_exchange_as_venue():
     """ExecIntent.venue must be a real AdapterRegistry/AccountRegistry key
     ("hyperliquid"), not the display label "hl" — OPMS routes strategies by
     this field, so a mismatch would 500 at strategy-creation time."""
-    config = PerpPairConfig(coin="BTC", gamma=1.0, kappa=0.5, exchange="hyperliquid")
+    config = PerpPairConfig(
+        coin="BTC", gamma=1.0, kappa=0.5, exchange="hyperliquid", account_id="mm-a"
+    )
     client = FakeOpmsClient(snapshots(drift=10.0))
     keeper = make_keeper(client, config)
     await client.start()
@@ -105,6 +107,7 @@ async def test_keeper_intents_use_configured_exchange_as_venue():
 
     assert client.sends, "keeper should have sent at least one intent"
     assert all(s.venue == "hyperliquid" for s in client.sends)
+    assert all(s.account_id == "mm-a" for s in client.sends)
 
 
 @pytest.mark.asyncio

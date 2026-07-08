@@ -52,6 +52,8 @@ class OpmsClient:
         """POST an mm_core ExecIntent to the OPMS intent endpoint."""
         session = await self._get_session()
         payload = dataclasses.asdict(intent)
+        if not payload.get("account_id"):
+            payload["account_id"] = self.account_id
         if not payload.get("client_id"):
             payload["client_id"] = f"{intent.venue}:{intent.coin}:{uuid.uuid4().hex[:12]}"
         async with session.post(f"{self.base_url}/api/v1/intents", json=payload) as resp:
@@ -114,7 +116,7 @@ class OpmsClient:
 
     async def _fills_ws_loop(self):
         session = await self._get_session()
-        url = f"{self.ws_base_url}/ws/fills/{self.exchange}"
+        url = f"{self.ws_base_url}/ws/fills/{self.exchange}?account_id={self.account_id}"
         while True:
             try:
                 logger.info("Connecting to OPMS fills WS")
@@ -125,8 +127,12 @@ class OpmsClient:
                             data = msg.json()
                             if data.get("type") == "fill":
                                 fill = data.get("data", {})
-                                # fills WS is venue-scoped (all symbols); filter to ours
-                                if fill.get("coin") == self.symbol and self._on_fill_cb:
+                                if fill.get("account_id") is None:
+                                    logger.warning("Ignoring fill without account_id on fills WS")
+                                    continue
+                                same_symbol = fill.get("coin") == self.symbol
+                                same_account = fill.get("account_id") == self.account_id
+                                if same_symbol and same_account and self._on_fill_cb:
                                     await self._on_fill_cb({
                                         "ts": float(fill.get("ts", 0.0)),
                                         "side": fill.get("side"),

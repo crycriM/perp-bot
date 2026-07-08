@@ -215,7 +215,7 @@ class Keeper:
             r = gueant_reservation_price(mid, pos, gamma, sigma, kappa)
             hs = gueant_half_spread(gamma, sigma, kappa)
             return ExecIntent(
-                venue=self.config.exchange, coin=coin,
+                venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
                 target_inventory=pos,
                 current_inventory=pos,
                 quote=QuoteSpec(
@@ -229,7 +229,7 @@ class Keeper:
             r = gueant_reservation_price(mid, pos, gamma, sigma, kappa)
             hs = gueant_half_spread(gamma, sigma, kappa) * self.config.widen_factor
             return ExecIntent(
-                venue=self.config.exchange, coin=coin,
+                venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
                 target_inventory=pos,
                 current_inventory=pos,
                 quote=QuoteSpec(
@@ -241,7 +241,7 @@ class Keeper:
             )
         elif decision == Decision.STOP_QUOTING:
             return ExecIntent(
-                venue=self.config.exchange, coin=coin,
+                venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
                 target_inventory=pos,
                 current_inventory=pos,
                 quote=None,
@@ -249,7 +249,7 @@ class Keeper:
             )
         elif decision == Decision.DE_RISK:
             return ExecIntent(
-                venue=self.config.exchange, coin=coin,
+                venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
                 target_inventory=0.0,
                 current_inventory=pos,
                 quote=None,
@@ -258,7 +258,7 @@ class Keeper:
             )
         elif decision == Decision.EMERGENCY_EXIT:
             return ExecIntent(
-                venue=self.config.exchange, coin=coin,
+                venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
                 target_inventory=0.0,
                 current_inventory=pos,
                 quote=None,

@@ -1,3 +1,4 @@
+README.md
 pyproject.toml
 src/perp_bot/__init__.py
 src/perp_bot/backtest.py
