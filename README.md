@@ -1,4 +1,4 @@
-# perp_bot
+# perp-bot
 
 Perp CLOB market-making bot built on `mm_core` and executed through OPMS.
 
@@ -19,7 +19,7 @@ This project is the **perp-side keeper and backtester** from the shared architec
 The architecture split is deliberate:
 
 - **`mm_core`** owns shared math and policy
-- **`perp_bot`** owns the perp keeper loop and backtest harness
+- **`perp-bot`** owns the perp keeper loop and backtest harness
 - **`dex_executor` / OPMS** owns actual execution, adapters, positions, and venue connectivity
 
 So this bot decides **what state to reach**:
@@ -134,7 +134,7 @@ Default routing uses `exchange="hyperliquid"` because OPMS expects real adapter 
 pip install -e .
 ```
 
-Requires Python 3.11+, `mm_core`, and `aiohttp`.
+Requires Python 3.11+, `mm-core`, and `aiohttp`.
 
 ## Tests
 
