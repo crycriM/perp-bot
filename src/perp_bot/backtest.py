@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import json
 import logging
 import time
@@ -31,6 +32,32 @@ class Backtrade:
     price: float
     size: float
 
+
+@dataclass
+class BacktestDecisionRecord:
+    source: str
+    ts: float
+    mid: float
+    inventory: float
+    equity: float
+    intent: ExecIntent | None
+
+
+def infer_tick_s_from_snapshots(snapshots: list[MarketSnapshot], default: float = 1.0) -> float:
+    """Infer a replay step from sparse market snapshots.
+
+    Real fetched HL datasets are candle-based, not one-snapshot-per-second.
+    Replaying them with a fixed 1s loop turns a 30-day dataset into millions of
+    empty iterations, so the CSV runner uses the smallest positive snapshot gap
+    as the backtest step.
+    """
+    positive_gaps = [
+        right.ts - left.ts
+        for left, right in zip(snapshots, snapshots[1:])
+        if right.ts > left.ts
+    ]
+    return min(positive_gaps) if positive_gaps else default
+
 class Backtest:
     """Event replay backtester for HL L2 + trades + funding.
 
@@ -39,7 +66,7 @@ class Backtest:
     two different pieces of math that can silently drift apart.
     """
 
-    def __init__(self, config, start_equity: float = 1.0):
+    def __init__(self, config, start_equity: float = 1.0, decision_log_path: str | None = None):
         self.config = config
         self.start_equity = start_equity
         self._trades: list[Backtrade] = []
@@ -55,6 +82,7 @@ class Backtest:
         self._resting_orders: list[dict] = []
         self._strategy = None
         self._baseline_spread: float = 50.0
+        self._decision_log = open(decision_log_path, "a") if decision_log_path else None
 
     def load_trades(self, trades: list[Backtrade]):
         self._trades = trades
@@ -100,7 +128,7 @@ class Backtest:
         self._resting_orders = remaining
         return filled
 
-    async def run(self, duration_s: float = 3600.0):
+    async def run(self, duration_s: float = 3600.0, tick_s: float = 1.0):
         coin = self.config.coin
         gamma = self.config.gamma
         kappa = self.config.kappa
@@ -113,7 +141,8 @@ class Backtest:
         t0 = self._snapshots[0].ts if self._snapshots else time.time()
         t_end = t0 + duration_s
         last_quote_ts = 0.0
-        tick_s = 1.0
+        if tick_s <= 0:
+            raise ValueError("tick_s must be > 0")
 
         t = t0
         while t < t_end:
@@ -153,6 +182,14 @@ class Backtest:
                 if self._strategy and len(self._mid_history) > 2:
                     intent = self._strategy(self.config, self._inventory, self._equity,
                                            self._mid_history, t, mid)
+                    self._log_decision(BacktestDecisionRecord(
+                        source="backtest",
+                        ts=t,
+                        mid=mid,
+                        inventory=self._inventory.position,
+                        equity=self._equity,
+                        intent=intent,
+                    ))
                     self._resting_orders = []
                     if intent and intent.quote:
                         self._resting_orders.append({
@@ -170,7 +207,17 @@ class Backtest:
             })
             t += tick_s
 
+        if self._decision_log is not None:
+            self._decision_log.close()
+            self._decision_log = None
+
         return self._history
+
+    def _log_decision(self, record: BacktestDecisionRecord) -> None:
+        if self._decision_log is None:
+            return
+        self._decision_log.write(json.dumps(dataclasses.asdict(record)) + "\n")
+        self._decision_log.flush()
 
     def pnl_explain(self):
         """Full PnL breakdown (spread capture, markout, funding, fees) as

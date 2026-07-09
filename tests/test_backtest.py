@@ -1,3 +1,4 @@
+import json
 import time
 
 import pytest
@@ -6,7 +7,13 @@ from mm_core.contracts import ExecIntent, MarketSnapshot, QuoteSpec
 from mm_core.inventory import Caps
 
 from perp_bot.config import PerpPairConfig
-from perp_bot.backtest import BaselineStrategy, Backtest, Backtrade, Strategy
+from perp_bot.backtest import (
+    BaselineStrategy,
+    Backtest,
+    Backtrade,
+    Strategy,
+    infer_tick_s_from_snapshots,
+)
 
 
 def make_config():
@@ -200,6 +207,36 @@ def test_baseline_strategy_quotes_symmetric_fixed_spread():
     # 100bps total spread on 50000 mid -> +/- 250 either side
     assert bid["price"] == pytest.approx(49750.0)
     assert ask["price"] == pytest.approx(50250.0)
+
+
+def test_infer_tick_s_from_snapshots_uses_smallest_positive_gap():
+    snaps = [
+        MarketSnapshot(venue="hl", coin="BTC", ts=10.0, mid=1.0),
+        MarketSnapshot(venue="hl", coin="BTC", ts=25.0, mid=1.0),
+        MarketSnapshot(venue="hl", coin="BTC", ts=55.0, mid=1.0),
+        MarketSnapshot(venue="hl", coin="BTC", ts=55.0, mid=1.0),
+    ]
+
+    assert infer_tick_s_from_snapshots(snaps) == pytest.approx(15.0)
+
+
+def test_backtest_writes_decision_log(tmp_path):
+    log_path = tmp_path / "bt-decisions.jsonl"
+    bt = Backtest(make_config(), start_equity=10000.0, decision_log_path=str(log_path))
+    bt.set_strategy(BaselineStrategy(spread_bps=100.0))
+    t0 = time.time()
+    for i in range(5):
+        bt.add_snapshot(MarketSnapshot(venue="hl", coin="BTC", ts=t0 + i, mid=50000.0))
+    bt.load_trades([])
+    bt.load_funding([])
+
+    import asyncio
+    asyncio.run(bt.run(duration_s=5.0))
+
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert records
+    assert all(rec["source"] == "backtest" for rec in records)
+    assert any(rec["intent"] is not None for rec in records)
 
 
 def test_gate_report_fails_on_thin_edge_and_reports_thresholds():

@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DecisionRecord:
+    source: str
     ts: float
     mid: float
     regime: str
@@ -30,6 +31,7 @@ class DecisionRecord:
     inventory: float
     equity: float
     total_pnl: float
+    intent_sent: bool
     intent: ExecIntent | None
 
 class Keeper:
@@ -41,10 +43,12 @@ class Keeper:
         config: PerpPairConfig,
         tick_s: float = 1.0,
         decision_log_path: str | None = None,
+        shadow_mode: bool = False,
     ):
         self.client = client
         self.config = config
         self.tick_s = tick_s
+        self.shadow_mode = shadow_mode
         self._risk = RiskPolicy(cfg=config.risk)
         self._markout = MarkoutTracker(horizons=(10.0, 30.0, 60.0))
         self._pnl = PnLLedger(venue=config.exchange, symbol=config.coin)
@@ -173,17 +177,24 @@ class Keeper:
             )
 
             intent = self._actuate(decision, urgency, ts, mid, regime)
+            intent_sent = False
             if intent:
-                await self.client.send_intent(intent)
+                if self.shadow_mode:
+                    logger.info("Shadow mode: logging intent without sending to OPMS")
+                else:
+                    await self.client.send_intent(intent)
+                    intent_sent = True
 
             total_pnl = self._pnl.explain(ts, mid, include_events=False).total_pnl
             record = DecisionRecord(
+                source="shadow" if self.shadow_mode else "live",
                 ts=ts, mid=mid,
                 regime=f"hl={regime.half_life:.0f},h={regime.hurst:.2f}",
                 decision=decision.value, urgency=urgency,
                 inventory=self._inventory.position,
                 equity=self._equity,
                 total_pnl=total_pnl,
+                intent_sent=intent_sent,
                 intent=intent,
             )
             self._log_decision(record)

@@ -186,6 +186,27 @@ async def test_keeper_writes_jsonl_decision_log(tmp_path):
     rec = json.loads(lines[0])
     assert {"ts", "mid", "regime", "decision", "urgency",
             "inventory", "equity", "total_pnl"} <= rec.keys()
+    assert rec["source"] == "live"
+    assert rec["intent_sent"] is True
+
+
+@pytest.mark.asyncio
+async def test_keeper_shadow_mode_logs_without_sending(tmp_path):
+    log_path = tmp_path / "shadow-decisions.jsonl"
+    client = FakeOpmsClient(snapshots(drift=10.0))
+    keeper = make_keeper(client, decision_log_path=str(log_path), shadow_mode=True)
+    await client.start()
+
+    for _ in range(3):
+        await keeper._tick()
+    await keeper.stop()
+
+    assert client.sends == []
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert records
+    assert all(rec["source"] == "shadow" for rec in records)
+    assert all(rec["intent_sent"] is False for rec in records)
+    assert any(rec["intent"] is not None for rec in records)
 
 
 @pytest.mark.asyncio

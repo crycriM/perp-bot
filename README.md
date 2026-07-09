@@ -255,14 +255,29 @@ subaccount-scoped (`/ws/fills/{exchange}?account_id=...`) so same-symbol
 strategies on different Hyperliquid subaccounts do not ingest each other's
 fills.
 
+For **C4.2 shadow**, use the same keeper path with `shadow_mode=True`: intents
+are fully computed and written into the decision log, but they are **not**
+posted to OPMS. The helper script runs this mode for a bounded window:
+
+```bash
+python scripts/run_shadow.py BTC \
+  --exchange hyperliquid \
+  --account-id test \
+  --gamma 0.25 --kappa 0.5 \
+  --max-position 0.1 --critical-position 0.2 \
+  --duration-s 900 \
+  --decision-log-path shadow-decisions.jsonl
+```
+
 **Logs:** `perp_bot.keeper`/`.opms_client`/`.backtest` log through stdlib
 `logging` (`logger.info(...)` per tick: mid, regime, decision, urgency,
 inventory, equity) — configure a handler yourself (`logging.basicConfig`
 above, or point it at a file) or you'll see nothing. Separately,
 `decision_log_path` (optional) appends one JSON line per tick — `ts, mid,
-regime, decision, urgency, inventory, equity, total_pnl, intent` — the only
-built-in persisted trail, and it's a flat file the caller owns (rotate it
-yourself); pass `None` (the default) to skip it.
+regime, decision, urgency, inventory, equity, total_pnl, intent`, plus
+`source` and `intent_sent` — the only built-in persisted trail, and it's a
+flat file the caller owns (rotate it yourself); pass `None` (the default) to
+skip it.
 
 **Position:** perp-bot holds no durable state of its own. `Keeper` keeps
 inventory in memory (`self._inventory.position`) and re-syncs it from OPMS's
@@ -331,13 +346,14 @@ bt.load_funding([
     {"ts": t0 + 1800, "rate": 1e-5},  # discrete scheduled payments, not
 ])                                    # continuous — HL pays hourly/8h
 
-history = asyncio.run(bt.run(duration_s=3600.0))  # tick_s is fixed at 1.0
-                                                    # inside run(), not
-                                                    # configurable
+history = asyncio.run(bt.run(duration_s=3600.0, tick_s=1.0))
 ```
 
-`history` is a list of `{ts, mid, equity, position}` dicts, one per
-simulated second. For the numbers that matter:
+`history` is a list of `{ts, mid, equity, position}` dicts, one per replay
+step. `tick_s` defaults to `1.0` in `Backtest.run(...)`, but the
+CSV-driven `scripts/run_backtest.py` infers a larger step from sparse candle
+data so 30-day fetches do not spend millions of iterations on empty seconds.
+For the numbers that matter:
 
 ```python
 m = bt.metrics()
@@ -354,6 +370,14 @@ report = bt.gate_report()
 realized/unrealized PnL, spread capture, markout, funding, fees, and every
 individual fill — for auditing *why* a number came out the way it did, not
 just what it is.
+
+If you pass `--decision-log-path` to `scripts/run_backtest.py`, the backtest
+also writes one JSONL intention record per replay step (`source="backtest"`).
+Compare a backtest artifact to a shadow run with:
+
+```bash
+python scripts/diff_decision_logs.py backtest-decisions.jsonl shadow-decisions.jsonl
+```
 
 Two things that look wired up but aren't yet: `set_baseline()` stores a
 `BaselineStrategy` on the instance but nothing in `run()`/`metrics()` reads
