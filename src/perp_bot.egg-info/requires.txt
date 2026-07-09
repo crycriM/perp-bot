@@ -3,6 +3,7 @@ aiohttp>=3.9.0
 
 [dev]
 pytest>=7.4.0
+pytest-asyncio>=1.4.0
 
 [fetch]
 hyperliquid-python-sdk>=0.4.0
