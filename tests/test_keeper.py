@@ -170,6 +170,31 @@ async def test_keeper_resnapshot_on_error_applies_positions():
 
 
 @pytest.mark.asyncio
+async def test_keeper_on_error_survives_resnapshot_failure():
+    """If the server is still down when _on_error fires (the common case
+    right after a disconnect), resnapshot_positions() itself raises. This
+    must not propagate: _on_error is invoked from inside OpmsClient's own
+    except block with no protection there, so an uncaught exception here
+    silently kills the whole WS reconnect loop task -- no further reconnect
+    attempts ever happen again."""
+    client = FakeOpmsClient(snapshots(), position=1.5)
+
+    async def failing_resnapshot():
+        client.resnapshot_calls += 1
+        raise RuntimeError("Cannot connect to host 127.0.0.1:8000")
+
+    client.resnapshot_positions = failing_resnapshot
+    keeper = make_keeper(client)
+    await client.start()
+
+    keeper._inventory.position = 0.0
+    await keeper._on_error(RuntimeError("ws dropped"))  # must not raise
+
+    assert client.resnapshot_calls == 1
+    assert keeper._inventory.position == 0.0  # unchanged: reconciliation was skipped
+
+
+@pytest.mark.asyncio
 async def test_keeper_writes_jsonl_decision_log(tmp_path):
     """Every tick appends one parseable JSON line — the shadow artifact."""
     log_path = tmp_path / "decisions.jsonl"

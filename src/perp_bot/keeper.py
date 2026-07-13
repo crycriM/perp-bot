@@ -96,7 +96,16 @@ class Keeper:
 
     async def _on_error(self, error):
         logger.error(f"OPMS error: {error}")
-        positions = await self.client.resnapshot_positions()
+        try:
+            positions = await self.client.resnapshot_positions()
+        except Exception as e:
+            # Best-effort reconciliation: the server may still be down right
+            # after a disconnect. This is called from inside OpmsClient's own
+            # except block with no protection there, so letting this raise
+            # kills the WS loop's task outright — no further reconnect
+            # attempts ever happen. Skip and let the next reconnect retry.
+            logger.warning(f"Resnapshot after error failed, will retry on next reconnect: {e}")
+            return
         self._apply_positions(positions)
 
     def _apply_positions(self, positions: dict) -> None:
