@@ -13,7 +13,7 @@ class PerpPairConfig:
     gamma: float = 0.5
     kappa: float = 0.3
     widen_factor: float = 2.0   # half-spread multiplier on WIDEN
-    exchange: str = "hyperliquid"  # OPMS/AccountRegistry/AdapterRegistry routing id;
+    exchange: str = "hyperliquid"  # hb-enhanced-opms/AccountRegistry/AdapterRegistry routing id;
                                     # also the ExecIntent.venue and PnLLedger.venue tag
     account_id: str = "default"
     position_mode: str | None = None
