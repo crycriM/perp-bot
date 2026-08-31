@@ -1,0 +1,408 @@
+# Market-neutral perp MM deployment plan — Hyperliquid
+
+Chosen architecture: **`hb-enhanced-opms` + Hummingbot's `hyperliquid_perpetual` connector**,
+driving the unmodified `perp_bot.keeper.Keeper` / `mm_core` decision engine via
+`PerpMMController` / `InProcessClient`. This sidesteps `dex_executor`'s missing
+`/api/v1/intents` (+ positions/equity/md/fills) surface and inherits Hummingbot's
+leverage, order-type, and reconnect handling instead of the incomplete
+`dex_executor` HL adapter (no leverage/margin management, no post-only orders).
+
+---
+
+## 1. Subaccount topology & cross-hedge basket design
+
+### 1.1 Why one subaccount can't hold both sides
+
+Hyperliquid is **net** position mode (`perp_bot.venue_capabilities`:
+`hyperliquid -> position_mode="net"`): a subaccount can only hold **one signed
+position per coin**. `perp_bot.topology.validate_account_topology` encodes
+this — it raises on any duplicate `(exchange, coin, account_id)`, i.e. two
+independently-managed keeper *instances* for the same coin cannot share one
+HL subaccount. Even without that check, HL itself would just net their
+orders into one blended position, destroying independent PnL/risk
+attribution between the two instances.
+
+This matters here because achieving **per-account market neutrality** for a
+coin pair via structural long/short tilting (§1.3) requires **two
+independent instances per coin** — one tilted long, one tilted short — which
+is exactly the case the topology check forbids on one account. Hence: two
+subaccounts, minimum, per hedged pair.
+
+Note on naming: positions here are **perpetual contracts**, not spot coin
+holdings — "ETH"/"SOL" below denote the ETHUSDC/SOLUSDC USDC-margined perp
+at Hyperliquid (`coin="ETH"`/`"SOL"` in `PerpPairConfig`, HL's own naming for
+the perpetual instrument), matching Aster/Lighter's equivalent USDC-quoted
+perps on those venues.
+
+### 1.2 Target structure (ETHUSDC/SOLUSDC example, generalizes to any correlated pair)
+
+| | Sub A | Sub B |
+|---|---|---|
+| ETHUSDC perp instance | tilt **long** | tilt **short** |
+| SOLUSDC perp instance | tilt **short** | tilt **long** |
+| Net bias within the account | long ETHUSDC / short SOLUSDC (basis position) | short ETHUSDC / long SOLUSDC (mirror basis position) |
+| Combined across A+B | ETHUSDC net ≈ 0, SOLUSDC net ≈ 0 | (same) |
+
+Two properties fall out of this, and both matter:
+
+- **Per-account neutrality to systematic moves**: within a single subaccount,
+  a correlated move (ETHUSDC and SOLUSDC both up/down together) largely
+  cancels in unrealized PnL, because one leg is long and the other short the
+  correlated perp. Since HL uses cross margin (§1.4) this cancellation nets
+  directly against the account's one shared USDC balance, stabilizing
+  equity and reducing the chance of hitting the maintenance-margin threshold
+  from a systematic (not idiosyncratic) move — see §1.4 for why this does
+  **not** reduce required gross margin, only its volatility.
+- **Portfolio-level flatness per coin**: because A and B are exact mirrors,
+  summing ETHUSDC exposure across A+B ≈ 0, and same for SOLUSDC — the firm
+  isn't carrying a naked ETH-vs-SOL basis bet at the aggregate level, only
+  the (smaller, monitored) residual imbalance from imperfect mirroring.
+
+### 1.3 Required `mm_core`/`perp_bot` extension: structural tilt
+
+**Implemented.** Today's AS math always mean-reverted inventory toward
+**zero**; it now supports a persistent, non-zero target via a
+`target_inventory` field on `PerpPairConfig` (default `0.0`, so untilted
+keepers are unaffected):
+
+1. **Tilted reservation price** —
+   [as_core.py](../../mm-core/src/mm_core/as_core.py)'s
+   `gueant_reservation_price` gained an optional `q_target: float = 0.0`
+   parameter; internally it computes `q_eff = q - q_target` and uses
+   `q_eff` in both the base tilt term and the optional funding term:
+   `r = mid - q_eff * gamma * sigma^2 / (2*kappa)`.
+2. **Target-relative caps** —
+   [risk_policy.py](../../mm-core/src/mm_core/risk_policy.py)'s
+   `RiskPolicy.evaluate` gained a `target_inventory: float = 0.0` parameter;
+   it now compares `inv_gap = abs(inventory.net_delta() - target_inventory)`
+   against `max_position`/`critical_position` for both the `WIDEN` and
+   `DE_RISK` thresholds, instead of raw `net_delta()`. A keeper tilted to
+   `q*` no longer appears permanently over-cap.
+3. **De-risk anchor** — [keeper.py](../src/perp_bot/keeper.py)'s `_actuate`
+   computes `q_target = self.config.target_inventory` and passes it to
+   `gueant_reservation_price` (QUOTE/WIDEN) and to the `DE_RISK` intent's
+   `target_inventory`. `EMERGENCY_EXIT` intentionally still targets `0.0` —
+   a full flatten in a true drawdown emergency shouldn't preserve the
+   structural tilt.
+4. `PerpPairConfig.target_inventory: float = 0.0` threads through to
+   `Keeper._tick`/`_actuate` as above, and to
+   [backtest.py](../src/perp_bot/backtest.py)'s `Strategy.__call__` (via
+   `getattr(config, "target_inventory", 0.0)`) so tilted instances can be
+   backtested before deployment.
+
+Covered by new unit tests in `mm-core/tests/test_mm_core.py`,
+`mm-core/tests/test_risk_policy.py`, and `perp-bot/tests/test_keeper.py` —
+not yet confirmed passing in a live run (local sandboxing blocked test
+execution this session); run `pytest` in both `mm-core/` and `perp-bot/`
+before relying on this.
+
+Still true regardless: do **not** attempt the tilt via `Caps` alone (e.g.
+setting `max_position` asymmetric bounds) — `Caps` remains a single
+symmetric `(max_position, critical_position)` pair around zero by design
+(venue/representation-agnostic); the target-relative comparison lives in
+`RiskPolicy.evaluate`, not in `Caps` itself.
+
+### 1.4 Collateral allocation
+
+Hyperliquid uses **cross margin** at the subaccount level: a single USDC
+balance is the collateral for *every* open position on that subaccount (no
+per-position isolated collateral pots), and account health is the ratio of
+total equity — USDC balance **plus** combined unrealized PnL across all
+positions on the account — to the summed maintenance margin of all
+positions. This is precisely why pairing correlated legs on one subaccount
+helps: a common-factor move that loses on the ETHUSDC-long leg gains on the
+SOLUSDC-short leg, and both PnLs net against the *same* shared USDC balance.
+
+Cross margin is scoped **per subaccount**, not shared across Sub A and Sub
+B — they're separate accounts with separate USDC balances, which is why
+§1.4's true-up step below is still needed.
+
+What cross margin does **not** do is discount the *required* maintenance
+margin itself — HL has no leverage/margin-mode API for portfolio-style risk
+netting (confirmed via the `dex_executor` HL adapter), so it still sums full
+per-position maintenance margin for both legs regardless of their
+correlation. Concretely:
+
+- Required maintenance margin is **not reduced** by holding offsetting legs
+  — HL still charges full per-position maintenance margin on both the
+  ETHUSDC and SOLUSDC leg regardless of their correlation. The benefit of
+  pairing is **equity stability** via the shared collateral pool (offsetting
+  unrealized PnL), not a smaller margin requirement.
+- Worst-case (both legs simultaneously at their cap, not netting):
+  $$MM_{\text{sub}} = \sum_{i \in \{ETH,SOL\}} \frac{\text{max\_position}_i \times \text{price}_i}{L_i}$$
+  where $L_i$ is HL's max leverage tier **at that notional** (tiers shrink at
+  higher notional — check HL's current tier table for the actual size, don't
+  assume a flat max leverage).
+- Residual risk after internal hedging is **basis risk** (ETH vs SOL
+  diverging), not outright directional risk. Size a buffer from the
+  historical dollar-notional-matched spread volatility:
+  $$\text{basis\_buffer} = k_\sigma \times \sigma_{\text{spread}} \times \sqrt{T_{\text{rebalance}}} \times \text{gross\_notional}$$
+  with $\sigma_{\text{spread}}$ estimated from `returns_{ETH} - \beta \cdot returns_{SOL}$ over a
+  representative lookback (fit $\beta$ by regression, or use dollar-neutral
+  1:1 sizing and skip $\beta$ if you'd rather keep the hedge ratio simple and
+  re-fit less often).
+- Total per-subaccount equity: $E_{\text{sub}} = MM_{\text{sub}} + \text{basis\_buffer} + \text{operational\_buffer}$
+  — this is the single USDC balance to deposit into that subaccount
+  (operational buffer: funding, fees, slippage tolerance — 10–20% of
+  $MM_{\text{sub}}$ is a reasonable starting point).
+- **Sub A and Sub B should be funded equally** (they're exact mirrors with
+  matched notional caps) — but don't assume they *stay* equal: funding
+  carry and basis P&L will accrue asymmetrically over time, and each
+  subaccount's cross-margin pool only sees its own USDC balance, not the
+  other's. True up collateral between them on a fixed cadence (e.g. weekly)
+  rather than assuming symmetry holds indefinitely.
+
+### 1.5 Netting / rebalancing controller — **Implemented** (`perp_bot.rebalancer.BasketRebalancer`)
+
+Reuse the "imbalance" framing already used elsewhere in this shop's tooling
+(see `dex_executor/memory/2026-04-13-troubleshooting.md`'s `theo imbalance`
+metric) for consistency. v1 is a standalone periodic asyncio job (7 tests
+passing); v2 (folding into keeper as a new `Decision`) is deferred until
+live data shows how often correction is needed:
+
+1. **Metric**, computed per subaccount at a slower cadence than the AS
+   quoting tick (e.g. every 5–15 minutes — this is portfolio-level control,
+   not HFT):
+   $$\text{imbalance}_{\text{sub}} = \sum_{\text{coin}} \big(\text{position}_{\text{coin,sub}} - q^*_{\text{coin,sub}}\big) \times \text{price}_{\text{coin}}$$
+   i.e. dollar-notional drift away from the *intended* tilted target, not
+   away from zero.
+2. **Trigger**: if `|imbalance_sub| / equity_sub` exceeds a threshold (start
+   around 15–20%), or the portfolio-level per-coin sum
+   `Σ_sub position_{coin,sub}` drifts materially from zero, issue a
+   corrective hedge order sized to close the gap.
+3. **Execution**: route the corrective order through `passive_aggressive`
+   (patient) unless the drift also breaches that account's own
+   `critical_position`/drawdown gates, in which case treat it with the same
+   urgency as `EMERGENCY_EXIT`.
+4. **v1 (recommended first)**: a standalone periodic job (cron-style, or a
+   simple asyncio loop reading each account's positions via the Hummingbot
+   connector) — no changes to `Keeper`'s per-tick loop required, keeps the
+   blast radius of new code small.
+5. **v2 (later)**: fold this into the keeper loop as a genuine new
+   `Decision` (e.g. `REBALANCE_TO_TARGET`) distinct from `DE_RISK`, evaluated
+   against the portfolio-level imbalance rather than each keeper's own
+   isolated inventory. Only worth building once v1 has live data showing how
+   often/how far the natural drift needs correcting.
+6. **Logging**: extend the existing `decision_log_path` JSONL convention —
+   one line per rebalance decision: `ts, account_id, coin, pre_position,
+   q_target, hedge_size, hedge_side, imbalance_pct`.
+
+### 1.6 Generalizing beyond one pair
+
+For a basket of $2n$ coins split into $n$ correlated pairs, the same
+structure repeats: $2n$ subaccounts (2 per pair), each coin gets a
+long-tilt and a short-tilt instance on two different subaccounts, and each
+subaccount pairs one long-tilt coin with one short-tilt coin from the same
+correlated pair. Keep pairs **within** the same subaccount correlated (so
+the internal hedge is real) — don't pair uncorrelated coins just to fill a
+slot; an uncorrelated "hedge" leg doesn't reduce equity volatility, it adds
+a second independent risk.
+
+### 1.7 Aster and Lighter: verified against their own docs — and they are *not* the same as each other
+
+The earlier draft of this section treated Aster and Lighter as one bucket
+based on `perp_bot.venue_capabilities` claiming `hedge` mode for both. I've
+since checked each venue's actual documentation and they diverge:
+
+#### Aster — confirmed true hedge mode
+
+[Aster's Hedge Mode docs](https://docs.asterdex.com/trading/perpetuals/hedge-mode.md)
+confirm it directly: "Hedge Mode allows you to hold both long and short
+positions at the same time under the same contract" (e.g. simultaneous long
+and short BTCUSDT on one account), toggled per-account in settings (One-Way
+vs Hedge Mode; cannot switch while positions/orders are open). This matches
+`venue_capabilities`'s `aster -> position_mode="hedge"`.
+
+[Aster's Margin docs](https://docs.asterdex.com/trading/perpetuals/margin.md)
+confirm the same two margin modes as HL — **Cross** (default, shared across
+all open positions, PnL nets, whole balance at risk) or **Isolated** (single
+position). Maintenance margin is described as a function of the position's
+own size via leverage tiers, with no mention of a reduced requirement for
+offsetting hedge-mode legs — read this the same way as HL: cross margin
+nets **PnL**, not the **margin requirement** itself.
+
+**Practical implication**: Aster genuinely does not need the cross-subaccount
+trick. One subaccount per coin, a long-tilt instance and a short-tilt
+instance of the *same* coin, cross margin so their PnL nets — no correlated
+proxy coin required, as originally proposed.
+
+#### Lighter — likely net mode, not hedge mode (contradicts the current code assumption)
+
+I could not find a "Hedge Mode" page anywhere in Lighter's docs (unlike
+Aster, which has one). More tellingly, Lighter's own formulas model a
+**single signed position per market per account**:
+
+- [PnL and Total Account Value](https://docs.lighter.xyz/trading/pnl-and-total-account-value.md):
+  "Let $pos_i$ be the current position size of an account... positive if
+  long and negative if short" — one scalar per market, not independent
+  long/short records.
+- [Order Types & Matching](https://docs.lighter.xyz/trading/order-types-and-matching.md):
+  Reduce-Only "ensures that changes to the position only move it closer to
+  zero, regardless of whether the position is positive or negative," and the
+  Order Margin risk check compares `New Order Side` against a singular
+  `Position Side` — both presuppose one net position, not two coexisting
+  sides.
+
+This is strong evidence Lighter is structurally identical to Hyperliquid
+here (net mode) — **not** hedge mode as `perp_bot.venue_capabilities`
+currently claims for `lighter`. I've corrected that assumption in code (see
+below); treat this as verified-by-inference rather than an explicit "we are
+net mode" statement from Lighter, and re-confirm with Lighter directly (or a
+testnet account) before relying on it for real capital.
+
+[Lighter's margin model](https://docs.lighter.xyz/trading/multi-asset-margin.md)
+is cross margin by default too — "Total Account Value = Collateral +
+Unrealized PnL" is the account-wide health metric, extended by Multi-Asset
+Margin (non-USDC collateral) and available per-position Isolated mode
+(separate "Allocated Margin"). Same caveat as Aster/HL: this nets PnL
+against a shared balance, it does not discount the underlying margin
+requirement for correlated positions.
+
+**Practical implication**: Lighter needs the **same 2-subaccount
+cross-hedge basket structure as Hyperliquid** (§1.2), not the simplified
+"1 account per coin" shape — it has the same single-net-position-per-market
+constraint.
+
+#### Code fix applied
+
+`perp_bot/venue_capabilities.py`'s `lighter` entry was `position_mode="hedge"`,
+`supports_same_account_hedge=True` — wrong per the above. Changed to match
+Hyperliquid (`position_mode="net"`, `supports_same_account_hedge=False`), so
+`validate_account_topology` now correctly rejects duplicate same-market
+instances on one Lighter account, same as it already does for HL. `aster`
+is unchanged (hedge mode confirmed correct).
+
+**Recommendation if migrating to Aster**: don't replicate the HL
+cross-subaccount basket structure — use "1 subaccount per coin, 2
+same-account tilted instances (long + short) per coin" instead. Fewer
+subaccounts, fewer collateral-transfer operations, no correlated-pair
+dependency, while still achieving per-account (in fact per-coin) delta
+neutrality directly. **For Lighter, replicate the HL structure as-is**
+(§1.2) since it shares HL's net-mode constraint.
+
+### 1.8 Decision summary
+
+| | Hyperliquid | Aster | Lighter |
+|---|---|---|---|
+| Position mode | net | hedge (confirmed) | net (corrected — was misclassified as hedge) |
+| Same-coin long+short on one account | Not possible — needs 2 subaccounts + a correlated pair partner | Possible directly | Not possible — needs the same 2-subaccount trick as HL |
+| Structure for per-account neutrality | 2×2 cross-hedge basket across a correlated pair (§1.2) | 1 account per coin, 2 tilted instances, no pairing needed | 2×2 cross-hedge basket across a correlated pair, same as HL |
+| Requires `mm_core` tilt extension (§1.3) | Yes | Yes | Yes |
+| Margin model | Cross margin per subaccount (shared USDC balance + netted unrealized PnL), no correlation-based margin discount | Cross (default) or isolated; same PnL-nets-not-margin-discount pattern as HL | Cross (default, extendable via Multi-Asset Margin) or isolated; same pattern as HL |
+
+---
+
+## 2. Parameter estimation — **Calibrated** (30-day backtest, 15m candles)
+
+Backtested ETH and SOL from 2026-07-31 to 2026-08-31 using `scripts/fetch_hl_data_v2.py`
+(direct REST API, bypasses SDK init issues) and `scripts/run_backtest.py`. Grid search
+over gamma/kappa to pass all gate checks (net_edge_bps > 2, markout_ratio < 0.5,
+max_drawdown < 5%, liquidations = 0).
+
+**Calibrated parameters** (see `scripts/basket_config.py`):
+
+| Coin | gamma | kappa | max_position | critical_position | q* (target_inventory) | Backtest metrics |
+|------|-------|-------|--------------|-------------------|----------------------|------------------|
+| ETH  | 4.0   | 0.5   | 1.0          | 2.0               | ±0.4 (40% tilt)      | edge=4.75bps, markout=0.40, dd=2.55% |
+| SOL  | 3.0   | 0.7   | 10.0         | 20.0              | ±4.0 (40% tilt)      | edge=51.3bps, markout=0.30, dd=0.89% |
+
+`q*` sized at 40% of `max_position` per §1.3 point 2 — leaves 60% headroom for AS
+quoting to skew before hitting `critical_position`. `Caps` bounds are interpreted
+relative to `q*` (target-relative comparison in `RiskPolicy.evaluate`).
+
+**Caveats**: backtest uses synthetic candle-derived trades (half volume on each side,
+ordered by high/low reached first) — not real tick data. Fidelity gap vs. live is a
+known limitation (§7). If live performance diverges significantly, replace with a
+WS trade-stream logger run for the fetch window.
+
+## 3. Order & inventory management
+
+Unchanged from the general plan (`Caps` sizing from equity/leverage, fixed
+10%/5% per-side quote sizing in `Keeper._actuate`, `tick_s>=5` against a real
+venue) — with the addition that, for tilted instances, `Caps` bounds are
+now interpreted relative to `q*` (§1.3), and the portfolio netting job (§1.5)
+is a second, slower control loop layered on top of each keeper's own
+`RiskPolicy`.
+
+## 4. Wiring / config — **Basket config ready** (`scripts/basket_config.py`)
+
+Four `PerpPairConfig` instances (one per coin per subaccount), callable via
+`from scripts.basket_config import get_basket_configs`:
+
+```python
+# Sub A: ETH tilt-long (+0.4), SOL tilt-short (-4.0)
+# Sub B: ETH tilt-short (-0.4), SOL tilt-long (+4.0)
+# All parameters calibrated per §2, q* at 40% of max_position
+```
+
+`validate_account_topology(get_basket_configs())` passes — no duplicate
+`(exchange, coin, account_id)` tuples. The topology rule was never the blocker
+for this shape; the missing structural-tilt mechanism (§1.3) was, and it's now
+implemented.
+
+**Collateral sizing** (per subaccount, cross margin @ 3x leverage, no portfolio
+discount per §1.4):
+- ETH notional at cap: 1.0 × $3000 = $3000
+- SOL notional at cap: 10.0 × $150 = $1500
+- Gross notional: $4500
+- Maintenance margin (approx): $1500
+- With basis + operational buffers (20%): $1800
+- **Recommended initial funding: $2000 USDC per subaccount** (conservative)
+
+## 5. Rollout sequence
+
+Backtest → shadow → testnet gate → micro-mainnet → scale, as in the general
+plan, with these basket-specific additions:
+
+1. Backtest each tilted instance individually first (does the tilted AS
+   quoting behave sanely at the chosen `q*`?), then backtest the netting
+   controller against **both** accounts' simulated positions together
+   (does the imbalance metric actually stay bounded?).
+2. Shadow-run all four instances (ETH×{A,B}, SOL×{A,B}) simultaneously
+   before any live capital — confirm the *aggregate* per-coin exposure
+   stays near zero in the decision logs, not just each instance individually.
+3. Micro-mainnet: fund both subaccounts at the smallest workable size,
+   validate the netting job actually fires and corrects a drift within one
+   full monitoring cycle before increasing size.
+
+## 6. Monitoring & kill switch
+
+In addition to the general plan's per-keeper monitoring: track
+`imbalance_sub` (§1.5) and portfolio per-coin net exposure as first-class
+dashboard metrics, alert if either persists beyond the rebalance job's own
+threshold for more than one cycle (a stuck rebalancer is its own failure
+mode, independent of each keeper's own risk policy).
+
+## 7. Known gaps to close before real capital
+
+- ~~**Structural tilt (§1.3)**~~ — **Implemented and verified** (112 mm-core +
+  45 perp-bot tests passing). `q_target` in `gueant_reservation_price`,
+  `target_inventory` in `RiskPolicy.evaluate`, threaded through `Keeper` and
+  `Backtest`. Lighter venue corrected to `position_mode="net"`.
+- ~~**Netting/rebalancing controller (§1.5)**~~ — **Implemented** (`perp_bot.rebalancer.BasketRebalancer`,
+  v1 standalone periodic job). 7 tests passing. Per-subaccount imbalance metric,
+  portfolio-level per-coin net tracking, configurable thresholds, JSONL decision
+  logging, shadow mode. Still needs live integration testing with real OPMS
+  position/price feeds before relying on it for capital.
+- **No portfolio-margin confirmation on HL, Aster, or Lighter** — all three
+  net PnL via cross margin but none confirm a reduced margin *requirement*
+  for offsetting positions; collateral must be sized for the gross sum
+  (§1.4) on all three venues. **HL portfolio margin requires $5M trading
+  volume** — not available for initial deployment, so cross margin is the
+  only option for now (already accounted for in §1.4 sizing).
+- ~~**Lighter's net-vs-hedge classification**~~ — **Verified**: Lighter is
+  confirmed net-mode (single signed position per market). Code is correct.
+- ~~**Post-only order support**~~ — **Verified**: HL connector supports
+  post-only (maker-only) orders. Can use to avoid taker fees on passive quotes.
+- **Subaccount creation and funding** — not yet done. Need to create basket_a
+  and basket_b on HL, fund with initial USDC collateral (sizing per §1.4).
+- **Hummingbot connector setup** — not yet deployed. Need to configure
+  hb-enhanced-opms with HL hyperliquid_perpetual connector for both subaccounts.
+- ~~**Historical data fetch**~~ — **Completed**: 30 days of ETH/SOL 15m candles
+  fetched via `scripts/fetch_hl_data_v2.py` (direct REST API, bypasses SDK init
+  issues). Data in `perp-bot/data/`. Backtest calibration done (§2).
+- **Live integration testing** — rebalancer needs testing with real OPMS
+  position/price feeds before relying on it for capital.
+- Everything listed in the general deployment plan's gaps section (leverage
+  set manually on HL, backtest's hardcoded `liquidations=0` gate, synthetic
+  candle-derived backtest trades) still applies per-instance here.

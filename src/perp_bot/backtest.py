@@ -286,7 +286,10 @@ class Strategy:
         if not mid_history or len(mid_history) < 2:
             return None
         sigma = VOLATILITY_MODELS["close_to_close"](mid_history)
-        r = gueant_reservation_price(mid, inventory.position, config.gamma, sigma, config.kappa)
+        r = gueant_reservation_price(
+            mid, inventory.position, config.gamma, sigma, config.kappa,
+            q_target=getattr(config, "target_inventory", 0.0),
+        )
         hs = gueant_half_spread(config.gamma, sigma, config.kappa)
         return ExecIntent(
             venue=config.exchange, coin=config.coin,

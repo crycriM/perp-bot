@@ -183,6 +183,7 @@ class Keeper:
                 ts=ts, mid=mid, equity=self._equity,
                 inventory=self._inventory, regime=regime,
                 avg_markout_bps=avg_markout,
+                target_inventory=self.config.target_inventory,
             )
 
             intent = self._actuate(decision, urgency, ts, mid, regime)
@@ -230,9 +231,10 @@ class Keeper:
         kappa = self.config.kappa
 
         pos = self._inventory.position
+        q_target = self.config.target_inventory
 
         if decision == Decision.QUOTE:
-            r = gueant_reservation_price(mid, pos, gamma, sigma, kappa)
+            r = gueant_reservation_price(mid, pos, gamma, sigma, kappa, q_target=q_target)
             hs = gueant_half_spread(gamma, sigma, kappa)
             return ExecIntent(
                 venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
@@ -246,7 +248,7 @@ class Keeper:
                 urgency=urgency,
             )
         elif decision == Decision.WIDEN:
-            r = gueant_reservation_price(mid, pos, gamma, sigma, kappa)
+            r = gueant_reservation_price(mid, pos, gamma, sigma, kappa, q_target=q_target)
             hs = gueant_half_spread(gamma, sigma, kappa) * self.config.widen_factor
             return ExecIntent(
                 venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
@@ -270,7 +272,7 @@ class Keeper:
         elif decision == Decision.DE_RISK:
             return ExecIntent(
                 venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
-                target_inventory=0.0,
+                target_inventory=q_target,
                 current_inventory=pos,
                 quote=None,
                 urgency=urgency,
@@ -279,7 +281,7 @@ class Keeper:
         elif decision == Decision.EMERGENCY_EXIT:
             return ExecIntent(
                 venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
-                target_inventory=0.0,
+                target_inventory=0.0,  # full flatten always overrides any structural tilt
                 current_inventory=pos,
                 quote=None,
                 urgency="emergency",

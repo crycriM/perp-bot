@@ -130,6 +130,39 @@ async def test_keeper_de_risk_on_critical_inventory():
 
 
 @pytest.mark.asyncio
+async def test_keeper_target_inventory_avoids_false_de_risk():
+    """A tilted instance must not de-risk just for sitting near its own q*."""
+    config = PerpPairConfig(coin="BTC", gamma=1.0, kappa=0.5, target_inventory=9.0)
+    config.caps = Caps(max_position=5.0, critical_position=8.0)
+    client = FakeOpmsClient(snapshots(drift=10.0), position=9.0)  # == target -> gap 0
+    keeper = make_keeper(client, config)
+    await client.start()
+
+    for _ in range(5):
+        await keeper._tick()
+
+    assert client.sends, "keeper should have sent at least one intent"
+    assert all(s.quote is not None for s in client.sends), "should keep quoting, not de-risk"
+
+
+@pytest.mark.asyncio
+async def test_keeper_de_risk_targets_structural_tilt_not_zero():
+    """DE_RISK on a tilted instance aims back at q*, not a full flatten to zero."""
+    config = PerpPairConfig(coin="BTC", gamma=1.0, kappa=0.5, target_inventory=9.0)
+    config.caps = Caps(max_position=5.0, critical_position=8.0)
+    client = FakeOpmsClient(snapshots(), position=20.0)  # far beyond q*=9 + critical=8
+    keeper = make_keeper(client, config)
+    await client.start()
+
+    for _ in range(3):
+        await keeper._tick()
+
+    de_risk = [s for s in client.sends if s.quote is None and s.urgency != "emergency"]
+    assert de_risk, f"expected a de-risk intent, got {client.sends}"
+    assert de_risk[-1].target_inventory == pytest.approx(9.0)
+
+
+@pytest.mark.asyncio
 async def test_keeper_emergency_exit_on_drawdown():
     client = FakeOpmsClient(snapshots(), equity=1000.0)
     keeper = make_keeper(client)

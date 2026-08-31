@@ -39,6 +39,18 @@ def test_validate_account_topology_allows_duplicate_aster_market_account():
     assert validate_account_topology(configs) == configs
 
 
+def test_validate_account_topology_rejects_duplicate_lighter_market_account():
+    """Lighter is net mode (verified against its own docs), same as Hyperliquid."""
+    configs = [
+        PerpPairConfig(coin="BTC", exchange="lighter", account_id="mm-a"),
+        PerpPairConfig(coin="BTC", exchange="lighter", account_id="mm-a"),
+    ]
+
+    with pytest.raises(ValueError, match="one keeper per"):
+        validate_account_topology(configs)
+
+
 def test_venue_capabilities_flag_same_account_hedge_support():
     assert get_venue_capabilities("hyperliquid").supports_same_account_hedge is False
-    assert get_venue_capabilities("lighter").supports_same_account_hedge is True
+    assert get_venue_capabilities("aster").supports_same_account_hedge is True
+    assert get_venue_capabilities("lighter").supports_same_account_hedge is False

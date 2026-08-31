@@ -131,8 +131,8 @@ Default routing uses `exchange="hyperliquid"` because OPMS expects real adapter 
 
 `position_mode` is inferred from the venue when omitted:
 
-- `hyperliquid` -> `net`
-- `aster` / `lighter` -> `hedge`
+- `hyperliquid` / `lighter` -> `net`
+- `aster` -> `hedge`
 
 For netted venues, deploy at most **one keeper per `(exchange, coin, account_id)`**.
 If you launch several keepers at once, validate that topology explicitly with
@@ -182,8 +182,8 @@ config = PerpPairConfig(
     coin="ETH",
     exchange="hyperliquid",   # OPMS adapter id — must match AccountRegistry
     account_id="test",        # -> HYPERLIQUID_TEST_* in OPMS's .env
-    # omitted -> inferred from venue capabilities: Hyperliquid = net,
-    # Aster/Lighter = hedge
+    # omitted -> inferred from venue capabilities: Hyperliquid/Lighter = net,
+    # Aster = hedge
     gamma=1.0,                # risk aversion — see calibration note below
     kappa=0.5,                # fill-intensity decay — see calibration note below
     # caps are in the coin's own base units (ETH here), not USD. Quote size

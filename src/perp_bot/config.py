@@ -18,6 +18,7 @@ class PerpPairConfig:
     account_id: str = "default"
     position_mode: str | None = None
     funding_interval_s: float = 3600.0  # HL funding cadence; ledger accrues pro-rata
+    target_inventory: float = 0.0  # structural tilt, e.g. one leg of a cross-hedged subaccount pair
     caps: Caps = None
     gate: GateConfig = None
     risk: RiskConfig = None

@@ -21,8 +21,11 @@ _VENUE_CAPABILITIES: dict[str, VenueCapabilities] = {
     ),
     "lighter": VenueCapabilities(
         venue="lighter",
-        position_mode="hedge",
-        supports_same_account_hedge=True,
+        # net, not hedge: Lighter's PnL/order-margin docs model a single
+        # signed position per market per account, and no hedge-mode toggle
+        # exists in their docs (unlike Aster's explicit Hedge Mode).
+        position_mode="net",
+        supports_same_account_hedge=False,
     ),
     "mock": VenueCapabilities(
         venue="mock",
