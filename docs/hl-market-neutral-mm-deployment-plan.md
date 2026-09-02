@@ -394,8 +394,9 @@ mode, independent of each keeper's own risk policy).
   confirmed net-mode (single signed position per market). Code is correct.
 - ~~**Post-only order support**~~ — **Verified**: HL connector supports
   post-only (maker-only) orders. Can use to avoid taker fees on passive quotes.
-- **Subaccount creation and funding** — not yet done. Need to create basket_a
-  and basket_b on HL, fund with initial USDC collateral (sizing per §1.4).
+- ~~**Subaccount creation and funding**~~ — **Done**: mm1 and mm2
+  created on HL, API keys stored in `.env` (repo root), each funded with
+  300 USDC.
 - **Hummingbot connector setup** — not yet deployed. Need to configure
   hb-enhanced-opms with HL hyperliquid_perpetual connector for both subaccounts.
 - ~~**Historical data fetch**~~ — **Completed**: 30 days of ETH/SOL 15m candles
