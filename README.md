@@ -2,7 +2,7 @@
 
 Perp CLOB market-making bot built on `mm_core` and executed through OPMS.
 
-This project is the **perp-side keeper and backtester** from the shared architecture in `clmm-animation/docs/perp-mm-strategy.md`, `mm-bot-shared-architecture.md`, and `plan-overview.md`. It does not place orders directly on exchanges. Instead, it consumes OPMS market-data and fill streams, runs shared AS/regime/risk logic, and emits `ExecIntent`s back to OPMS.
+This project is the **perp-side keeper and backtester** from the shared architecture in `clmm-animation/docs/perp-mm-strategy.md`, `common-mm-bot-shared-architecture.md`, and `common-plan-overview.md`. It does not place orders directly on exchanges. Instead, it consumes OPMS market-data and fill streams, runs shared AS/regime/risk logic, and emits `ExecIntent`s back to OPMS.
 
 ## What this bot does
 
@@ -304,7 +304,7 @@ no network, no OPMS — driven by the same `mm_core.pnl.PnLLedger` the live
 keeper uses, so backtest and live PnL are never two different pieces of
 math.
 
-**There is no data fetcher yet** (Stream C's `mm-remaining-tasks-BCDE.md`
+**There is no data fetcher yet** (Stream C's `common-mm-remaining-tasks-BCDE.md`
 task "C3 data fetch" is still open) — you feed it `MarketSnapshot`/
 `Backtrade`/funding lists yourself. Today the only exercised path is
 synthetic data (see `tests/test_backtest.py`); pulling real HL history
@@ -388,7 +388,7 @@ instances (one `set_strategy(Strategy(config))`, one
 `0` — there's no margin/leverage model in this backtester, so that gate
 always passes regardless of how much leverage the live config would use.
 
-See `mm-remaining-tasks-BCDE.md`'s Stream C section for the full rollout
+See `common-mm-remaining-tasks-BCDE.md`'s Stream C section for the full rollout
 sequence this feeds into: backtest → shadow (log intents, don't send) →
 testnet live → micro mainnet.
 

@@ -1,5 +1,5 @@
 """
-C4.3 manual live-testnet gate (see clmm-animation/docs/mm-remaining-tasks-BCDE.md).
+C4.3 manual live-testnet gate (see clmm-animation/docs/common-mm-remaining-tasks-BCDE.md).
 
 Runs the real perp_bot.keeper.Keeper against a locally-spawned dex_executor
 (OPMS) instance talking to Hyperliquid testnet, end to end:
