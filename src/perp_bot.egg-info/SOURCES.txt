@@ -6,6 +6,7 @@ src/perp_bot/config.py
 src/perp_bot/keeper.py
 src/perp_bot/opms_client.py
 src/perp_bot/rebalancer.py
+src/perp_bot/rebalancer_feeds.py
 src/perp_bot/topology.py
 src/perp_bot/venue_capabilities.py
 src/perp_bot.egg-info/PKG-INFO
@@ -17,4 +18,5 @@ tests/test_backtest.py
 tests/test_keeper.py
 tests/test_opms_client.py
 tests/test_rebalancer.py
+tests/test_rebalancer_feeds.py
 tests/test_topology.py
