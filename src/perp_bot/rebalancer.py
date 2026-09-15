@@ -36,6 +36,11 @@ class RebalanceConfig:
     portfolio_net_threshold: float = 0.05
     cycle_interval_s: float = 600.0
     passive_aggressive: bool = True
+    # Plan §1.4 sizing: gross notional ≈ 2.5x equity at 3x leverage with
+    # buffers. A correction that would push the account past this is not
+    # proposed at all — underfunded accounts must not be market-ordered up
+    # to their structural tilt (live finding 2026-09-15).
+    max_gross_notional_multiple: float = 2.5
 
 
 @dataclass
@@ -112,52 +117,77 @@ class BasketRebalancer:
         for account_id, cfgs in by_account.items():
             imbalance, equity = await self.compute_imbalance(account_id)
             imbalance_pct = abs(imbalance) / equity if equity > 0 else 0.0
+            if imbalance_pct <= self.cfg.imbalance_pct_threshold:
+                continue
 
-            if imbalance_pct > self.cfg.imbalance_pct_threshold:
-                for cfg in cfgs:
-                    position, _ = await self.position_provider(account_id, cfg.coin)
-                    price = await self.price_provider(cfg.coin)
-                    drift = position - cfg.target_inventory
-                    if abs(drift * price) < 1e-6:
-                        continue
+            # One snapshot of the account's book, then decide all-or-none.
+            book: list[tuple[PerpPairConfig, float, float, float]] = []
+            gross = 0.0
+            for cfg in cfgs:
+                position, _ = await self.position_provider(account_id, cfg.coin)
+                price = await self.price_provider(cfg.coin)
+                gross += abs(position) * price
+                drift = position - cfg.target_inventory
+                if abs(drift * price) >= 1e-6:
+                    book.append((cfg, position, price, drift))
 
-                    hedge_size = -drift
-                    hedge_side = "buy" if hedge_size > 0 else "sell"
-                    urgency = "normal" if self.cfg.passive_aggressive else "immediate"
-
-                    intent = ExecIntent(
-                        venue=cfg.exchange,
-                        coin=cfg.coin,
-                        account_id=account_id,
-                        target_inventory=cfg.target_inventory,
-                        current_inventory=position,
-                        quote=None,
-                        urgency=urgency,
-                        strategy_hint="passive_aggressive" if self.cfg.passive_aggressive else "twap",
-                        client_id=f"rebalance:{account_id}:{cfg.coin}:{ts:.0f}",
-                    )
-
-                    if not self.shadow_mode:
-                        await self.intent_sender(intent)
-
+            proposed = sum(abs(drift) * price for _, _, price, drift in book)
+            budget = equity * self.cfg.max_gross_notional_multiple
+            if gross + proposed > budget:
+                logger.warning(
+                    f"{account_id}: capacity guard — gross ${gross:.2f} + correction "
+                    f"${proposed:.2f} exceeds {self.cfg.max_gross_notional_multiple:.1f}x "
+                    f"equity ${equity:.2f}; no correction sent"
+                )
+                for cfg, position, _, _ in book:
                     record = RebalanceRecord(
-                        ts=ts,
-                        account_id=account_id,
-                        coin=cfg.coin,
-                        pre_position=position,
-                        q_target=cfg.target_inventory,
-                        hedge_size=abs(hedge_size),
-                        hedge_side=hedge_side,
-                        imbalance_pct=imbalance_pct,
-                        trigger="subaccount_imbalance",
+                        ts=ts, account_id=account_id, coin=cfg.coin,
+                        pre_position=position, q_target=cfg.target_inventory,
+                        hedge_size=0.0, hedge_side="none",
+                        imbalance_pct=imbalance_pct, trigger="capacity_guard_skip",
                     )
                     records.append(record)
                     self._log_decision(record)
-                    logger.info(
-                        f"Rebalance: {account_id}/{cfg.coin} drift={drift:+.4f} "
-                        f"hedge={hedge_side} {abs(hedge_size):.4f} "
-                        f"imbalance_pct={imbalance_pct:.2%}"
-                    )
+                continue
+
+            for cfg, position, price, drift in book:
+                hedge_size = -drift
+                hedge_side = "buy" if hedge_size > 0 else "sell"
+                urgency = "normal" if self.cfg.passive_aggressive else "immediate"
+
+                intent = ExecIntent(
+                    venue=cfg.exchange,
+                    coin=cfg.coin,
+                    account_id=account_id,
+                    target_inventory=cfg.target_inventory,
+                    current_inventory=position,
+                    quote=None,
+                    urgency=urgency,
+                    strategy_hint="passive_aggressive" if self.cfg.passive_aggressive else "twap",
+                    client_id=f"rebalance:{account_id}:{cfg.coin}:{ts:.0f}",
+                )
+
+                if not self.shadow_mode:
+                    await self.intent_sender(intent)
+
+                record = RebalanceRecord(
+                    ts=ts,
+                    account_id=account_id,
+                    coin=cfg.coin,
+                    pre_position=position,
+                    q_target=cfg.target_inventory,
+                    hedge_size=abs(hedge_size),
+                    hedge_side=hedge_side,
+                    imbalance_pct=imbalance_pct,
+                    trigger="subaccount_imbalance",
+                )
+                records.append(record)
+                self._log_decision(record)
+                logger.info(
+                    f"Rebalance: {account_id}/{cfg.coin} drift={drift:+.4f} "
+                    f"hedge={hedge_side} {abs(hedge_size):.4f} "
+                    f"imbalance_pct={imbalance_pct:.2%}"
+                )
 
         portfolio_net = await self.compute_portfolio_net()
         for coin, net_pos in portfolio_net.items():

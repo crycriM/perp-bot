@@ -225,3 +225,51 @@ async def test_portfolio_net_drift_logged_as_warning():
     assert len(records) == 0
     net = await rebalancer.compute_portfolio_net()
     assert abs(net["ETH"]) == pytest.approx(0.2)
+
+
+@pytest.mark.asyncio
+async def test_capacity_guard_skips_correction_the_account_cannot_carry():
+    """Live 2026-09-15: flat 300 USDC shadow accounts vs a +0.4 ETH / -4 SOL
+    tilt need ~$570+ notional to establish — above the plan §1.4 budget
+    (~2.5x equity). The job must log the skip, not propose the trade."""
+    configs = _make_basket(eth_target=0.4, sol_target=-4.0)
+    positions = {
+        ("basket_a", "ETH"): (0.0, 300.0), ("basket_a", "SOL"): (0.0, 300.0),
+        ("basket_b", "ETH"): (0.0, 300.0), ("basket_b", "SOL"): (0.0, 300.0),
+    }
+    sent, sender = _intent_sink()
+    rebalancer = BasketRebalancer(
+        configs=configs,
+        position_provider=_position_provider(positions),
+        price_provider=_price_provider({"ETH": 3000.0, "SOL": 150.0}),
+        intent_sender=sender,
+    )
+    records = await rebalancer.rebalance_cycle()
+    assert sent == []
+    a_records = [r for r in records if r.account_id == "basket_a"]
+    assert len(a_records) == 2
+    assert {r.trigger for r in a_records} == {"capacity_guard_skip"}
+    assert all(r.hedge_size == 0.0 for r in a_records)
+
+
+@pytest.mark.asyncio
+async def test_capacity_guard_allows_plan_sized_account():
+    """At the plan §1.4 funding (gross ≈ 2.5x equity at 3x) the same tilt
+    correction fits, so the guard must not block it."""
+    configs = _make_basket(eth_target=0.4, sol_target=-4.0)
+    positions = {
+        ("basket_a", "ETH"): (0.0, 2000.0), ("basket_a", "SOL"): (0.0, 2000.0),
+        ("basket_b", "ETH"): (0.0, 2000.0), ("basket_b", "SOL"): (0.0, 2000.0),
+    }
+    sent, sender = _intent_sink()
+    rebalancer = BasketRebalancer(
+        configs=configs,
+        position_provider=_position_provider(positions),
+        price_provider=_price_provider({"ETH": 3000.0, "SOL": 150.0}),
+        intent_sender=sender,
+    )
+    records = await rebalancer.rebalance_cycle()
+    a_sent = [i for i in sent if i.account_id == "basket_a"]
+    assert len(a_sent) == 2
+    a_records = [r for r in records if r.account_id == "basket_a"]
+    assert {r.trigger for r in a_records} == {"subaccount_imbalance"}
