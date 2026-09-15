@@ -54,6 +54,7 @@ class Keeper:
         self._pnl = PnLLedger(venue=config.exchange, symbol=config.coin)
         self._inventory = PerpInventory(position=0.0, _caps=config.caps)
         self._equity = 0.0
+        self._margin_available: float | None = None
         self._mid_history: deque = deque(maxlen=200)
         self._running = False
         self._last_funding_ts: float | None = None
@@ -120,6 +121,7 @@ class Keeper:
             self._reconcile_pnl_position(pos.position)
             self._inventory.position = pos.position
             self._equity = pos.equity
+            self._margin_available = getattr(pos, "margin_available", None)
 
     def _reconcile_pnl_position(self, opms_position: float) -> None:
         """A missed fill (dropped websocket message, restart) leaves the
@@ -174,6 +176,7 @@ class Keeper:
             self._apply_positions(positions)
             if positions.get(coin) is None:
                 self._equity = 1.0
+                self._margin_available = None
 
             prices = [p for _, p in self._mid_history]
             regime = evaluate_regime(list(self._mid_history))
@@ -184,6 +187,7 @@ class Keeper:
                 inventory=self._inventory, regime=regime,
                 avg_markout_bps=avg_markout,
                 target_inventory=self.config.target_inventory,
+                margin_available=self._margin_available,
             )
 
             intent = self._actuate(decision, urgency, ts, mid, regime)

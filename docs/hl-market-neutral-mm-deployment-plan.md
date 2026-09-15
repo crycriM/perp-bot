@@ -382,14 +382,33 @@ mode, independent of each keeper's own risk policy).
 - ~~**Netting/rebalancing controller (§1.5)**~~ — **Implemented** (`perp_bot.rebalancer.BasketRebalancer`,
   v1 standalone periodic job). 7 tests passing. Per-subaccount imbalance metric,
   portfolio-level per-coin net tracking, configurable thresholds, JSONL decision
-  logging, shadow mode. Still needs live integration testing with real OPMS
-  position/price feeds before relying on it for capital.
+  logging, shadow mode. **Live shadow ran 2026-09-15** against real HL positions
+  and mids (`scripts/run_rebalancer_shadow.py` + `rebalancer_feeds.py`, 7 feed
+  tests; four basket instances mapped onto `e2_mm1`/`e2_mm2`, logs in
+  `perp-bot/logs/rebalancer_shadow_*.jsonl`). It surfaced a sizing gap the unit
+  tests could not: the 300 USDC accounts read ~190% imbalance and a full tilt
+  establishment would need ~$1363 vs the §1.4 budget (~2.5x equity = ~$749), so
+  a new `max_gross_notional_multiple` guard (default 2.5, per §1.4) now
+  skips-and-logs such corrections instead of proposing them (2 tests).
+  Still open: the OPMS intent feed (needs OPMS running) and a bounded
+  correction on plan-funded accounts.
 - **No portfolio-margin confirmation on HL, Aster, or Lighter** — all three
   net PnL via cross margin but none confirm a reduced margin *requirement*
   for offsetting positions; collateral must be sized for the gross sum
   (§1.4) on all three venues. **HL portfolio margin requires $5M trading
   volume** — not available for initial deployment, so cross margin is the
-  only option for now (already accounted for in §1.4 sizing).
+  only option for now (already accounted for in §1.4 sizing). **A
+  margin-health stop is now implemented (2026-09-15)**: `RiskConfig`
+  gained `margin_health_soft=0.20`/`margin_health_hard=0.10` and
+  `RiskPolicy.evaluate` takes `margin_available` (the venue-computed
+  available-after-maintenance balance; HL unified accounts publish it as
+  `spotClearinghouseState.tokenToAvailableAfterMaintenance`). Hard breach →
+  `EMERGENCY_EXIT`, soft → `DE_RISK`, `None` (venue doesn't publish it)
+  disables both — threaded through `perp_bot.Position.margin_available` →
+  `Keeper._tick`, and `OpmsClient` parses it from the positions payload
+  when the OPMS provides it. The HB controller path doesn't feed it yet
+  (HB's HL connector exposes no spot clearinghouse state); until it does,
+  the HB path runs with the stop dormant and only the drawdown stop active.
 - ~~**Lighter's net-vs-hedge classification**~~ — **Verified**: Lighter is
   confirmed net-mode (single signed position per market). Code is correct.
 - ~~**Post-only order support**~~ — **Verified at the venue level**: HL

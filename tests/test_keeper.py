@@ -14,11 +14,12 @@ from perp_bot.opms_client import Position
 class FakeOpmsClient:
     """Fake OPMS client with canned snapshots + configurable position."""
 
-    def __init__(self, snapshots=None, position=0.0, equity=1000.0):
+    def __init__(self, snapshots=None, position=0.0, equity=1000.0, margin_available=None):
         self.snapshots = snapshots or []
         self.sends: list[ExecIntent] = []
         self.position = position
         self.equity = equity
+        self.margin_available = margin_available
         self.resnapshot_calls = 0
         self._on_snapshot_cb = None
         self._on_fill_cb = None
@@ -47,7 +48,10 @@ class FakeOpmsClient:
 
     async def get_positions(self):
         return {
-            "BTC": Position(coin="BTC", position=self.position, equity=self.equity),
+            "BTC": Position(
+                coin="BTC", position=self.position, equity=self.equity,
+                margin_available=self.margin_available,
+            ),
         }
 
     async def resnapshot_positions(self):
@@ -174,6 +178,55 @@ async def test_keeper_emergency_exit_on_drawdown():
         await keeper._tick()
 
     assert any(s.urgency == "emergency" for s in client.sends)
+
+
+@pytest.mark.asyncio
+async def test_keeper_emergency_exit_on_margin_health_breach():
+    """HL publishes tokenToAvailableAfterMaintenance (spot total − cross
+    maintenance margin used). A hard breach of the margin-health ratio must
+    escalate to emergency exit with a full flatten (target 0, not q*)."""
+    config = PerpPairConfig(coin="BTC", gamma=1.0, kappa=0.5, target_inventory=2.0)
+    client = FakeOpmsClient(snapshots(), position=2.0, equity=300.0, margin_available=15.0)  # 5% < 10%
+    keeper = make_keeper(client, config)
+    await client.start()
+
+    for _ in range(3):
+        await keeper._tick()
+
+    emergency = [s for s in client.sends if s.urgency == "emergency"]
+    assert emergency, f"expected an emergency intent, got {client.sends}"
+    assert emergency[-1].target_inventory == 0.0  # full flatten overrides the tilt
+
+
+@pytest.mark.asyncio
+async def test_keeper_de_risk_on_soft_margin_health_breach():
+    """A soft margin-health breach de-risks back toward the structural tilt."""
+    config = PerpPairConfig(coin="BTC", gamma=1.0, kappa=0.5, target_inventory=2.0)
+    client = FakeOpmsClient(snapshots(), position=2.0, equity=300.0, margin_available=45.0)  # 15% < 20%
+    keeper = make_keeper(client, config)
+    await client.start()
+
+    for _ in range(3):
+        await keeper._tick()
+
+    de_risk = [s for s in client.sends if s.quote is None and s.urgency != "emergency"]
+    assert de_risk, f"expected a de-risk intent, got {client.sends}"
+    assert de_risk[-1].target_inventory == pytest.approx(2.0)
+
+
+@pytest.mark.asyncio
+async def test_keeper_margin_health_absent_still_quotes():
+    """No margin_available in the position snapshot (other venues / older
+    OPMS) must not change behaviour."""
+    config = PerpPairConfig(coin="BTC", gamma=1.0, kappa=0.5)
+    client = FakeOpmsClient(snapshots(drift=10.0), position=0.0, equity=1000.0, margin_available=None)
+    keeper = make_keeper(client, config)
+    await client.start()
+
+    for _ in range(5):
+        await keeper._tick()
+
+    assert any(s.quote is not None for s in client.sends)
 
 
 @pytest.mark.asyncio

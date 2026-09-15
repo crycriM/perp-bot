@@ -13,6 +13,10 @@ class Position:
     coin: str
     position: float
     equity: float
+    # Venue-computed liquidation-distance balance (HL unified accounts:
+    # spotClearinghouseState.tokenToAvailableAfterMaintenance = spot total −
+    # crossMaintenanceMarginUsed). None when the venue/OPMS doesn't publish it.
+    margin_available: float | None = None
 
 class OpmsClient:
     """REST + WS client for the OPMS with reconnect and resnapshot-on-reconnect.
@@ -80,7 +84,11 @@ class OpmsClient:
         equity = await self._get_equity()
         quantity = float(data["quantity"])
         signed = quantity if data["side"] == "long" else -quantity
-        self._positions = {self.coin: Position(coin=self.coin, position=signed, equity=equity)}
+        margin_available = data.get("margin_available")
+        self._positions = {self.coin: Position(
+            coin=self.coin, position=signed, equity=equity,
+            margin_available=float(margin_available) if margin_available is not None else None,
+        )}
         return self._positions
 
     def on_snapshot(self, callback):
