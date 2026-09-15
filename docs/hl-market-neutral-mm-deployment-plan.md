@@ -392,18 +392,81 @@ mode, independent of each keeper's own risk policy).
   only option for now (already accounted for in §1.4 sizing).
 - ~~**Lighter's net-vs-hedge classification**~~ — **Verified**: Lighter is
   confirmed net-mode (single signed position per market). Code is correct.
-- ~~**Post-only order support**~~ — **Verified**: HL connector supports
-  post-only (maker-only) orders. Can use to avoid taker fees on passive quotes.
+- ~~**Post-only order support**~~ — **Verified at the venue level**: HL
+  `Alo` (Add-Liquidity-Only) orders are maker-only, proven live on mainnet
+  2026-09-14 (passive rests, crossing is rejected without filling).
+  **Confirmed through Hummingbot 2026-09-15:** the connector maps
+  `OrderType.LIMIT_MAKER` to `{"tif": "Alo"}`, and
+  `scripts/run_hb_mainnet_quote_gate.py` placed and rested real
+  `ExecutionStrategy.LIMIT_MAKER` orders through it on mainnet. Note that HB's
+  `OrderExecutor` also clamps a maker price to the touch
+  (`min(price, best_bid)` / `max(price, best_ask)`), so a keeper quote inside
+  the spread becomes a join-the-touch order rather than an ALO rejection.
 - ~~**Subaccount creation and funding**~~ — **Done**: mm1 and mm2
   created on HL, API keys stored in `.env` (repo root), each funded with
-  300 USDC.
-- **Hummingbot connector setup** — not yet deployed. Need to configure
-  hb-enhanced-opms with HL hyperliquid_perpetual connector for both subaccounts.
+  300 USDC. **Verified 2026-09-14:** `e2_mm1`/`e2_mm2` hold 300 USDC each
+  and `e2_main` 131.98 USDC, all in **spot** (HL unified-account mode, so spot
+  USDC collateralizes perps — perp `accountValue` reads 0 until a position
+  opens). ⚠ All three entries currently share **one agent signer key**
+  (`0x8a9e…Fd709`); fine sequentially, but split them onto separate agent
+  wallets before running the basket's mm1+mm2 legs concurrently, or they will
+  collide on HL nonces.
+- **Hummingbot connector setup** — code path ready, credentials not yet
+  imported. **Updated 2026-09-15:** Hummingbot (the pinned
+  `/home/christian/sources/hummingbot` checkout, v2.16.0) is now **compiled** —
+  all 60 Cython `.pyx` have `.so` files and `import
+  hummingbot.connector.connector_base` succeeds. `PerpMMController` was fixed
+  against the real runtime: it used a non-existent `TwapExecutorConfig` (the
+  real class is `TWAPExecutorConfig`, taking
+  `total_amount_quote`/`total_duration`/`order_interval`/`mode`), it never
+  registered its custom `passive_aggressive_executor` config with
+  `ExecutorOrchestrator._executor_mapping`, and `_current_equity()` looked up
+  `"USDC"` where the HL connector reports `"USD"` — all fixed and locked by
+  `hb-enhanced-opms/tests_real/` (13 real-HB tests, no stubs). The live
+  read-only smoke (`scripts/run_hb_mainnet_smoke.py`) now runs the real
+  `on_start()` + `update_processed_data()` on mainnet for `e2_mm1` (vault) and
+  `e2_main` (master) with no orders, verifying FillObserver registration, mid,
+  funding, positive equity, and analytics.
+  `scripts/import_hl_mainnet_credentials.py` sets `use_vault` correctly per
+  account (auto-detects subaccount vs master), but the actual credential import
+  still needs `HB_PASSWORD`.
+  ⚠ **The pinned checkout carries one local patch:** the HL WS funding parser
+  used `openInterest` as the funding rate (reported ~1.04e6 instead of
+  `1.25e-05`); patched to use `funding`. Re-apply after any Hummingbot update;
+  the smoke guards it.
+  ⚠ Hummingbot keys credentials by **connector name**, and there is only one
+  `hyperliquid_perpetual` slot, so running `e2_mm1` and `e2_mm2` concurrently
+  needs two HB instances (or a connector-name split) — not yet solved.
+  **Live quote/cancel gate passed 2026-09-15** on `e2_mm1` and `e2_mm2`
+  (`hb-enhanced-opms/scripts/run_hb_mainnet_quote_gate.py`): the real
+  `PerpMMController` turned its own `QUOTE` decision into two resting 0.006 ETH
+  `Alo` orders on the target subaccount only (raw-SDK check of all three
+  accounts), refreshed them, and tore down to 0 orders / 0 positions with
+  balances unchanged. **Fill / de-risk / emergency gate passed 2026-09-15**
+  on `e2_mm1` (`run_hb_mainnet_derisk_gate.py`): real fill and position
+  reconciliation, reduce-only passive de-risk to flat, emergency exit to flat
+  in 24.8 s, after fixing six HB-path defects (position source, executor
+  churn, reduce-only, min-notional children, `ExecutorInfo` union, stale
+  position after fills). Emergency child limit is 5 s (market order 8.7 s
+  after the decision). Unified-account equity was verified live to include
+  unrealized PnL (HL marks the spot USDC total to market), so the drawdown stop
+  is sound; `tokenToAvailableAfterMaintenance` is available if a
+  margin-health stop is wanted. Not yet covered: the two legs running
+  concurrently — see `perp-bot/status.md`.
+- ~~**Raw mainnet subaccount routing**~~ — **Proven 2026-09-14** (raw HL SDK):
+  `hb-enhanced-opms/tests_live/` ran 30/30 on HL mainnet; orders signed with
+  `vault_address=<subaccount>` rest only on that subaccount and are invisible
+  to the other subaccount and the master, then cancel cleanly (0 orders/0
+  positions left). Post-only (`Alo`) was also proven maker-only: a passive ALO
+  rests, a crossing ALO is rejected rather than filled. This validates the
+  routing and maker-only seams HB must reproduce; it is not yet HB connector
+  evidence.
 - ~~**Historical data fetch**~~ — **Completed**: 30 days of ETH/SOL 15m candles
   fetched via `scripts/fetch_hl_data_v2.py` (direct REST API, bypasses SDK init
   issues). Data in `perp-bot/data/`. Backtest calibration done (§2).
-- **Live integration testing** — rebalancer needs testing with real OPMS
-  position/price feeds before relying on it for capital.
+- **Live integration testing** — the HB quote path is now proven live
+  (above); the rebalancer still needs testing with real position/price feeds
+  before relying on it for capital.
 - Everything listed in the general deployment plan's gaps section (leverage
   set manually on HL, backtest's hardcoded `liquidations=0` gate, synthetic
   candle-derived backtest trades) still applies per-instance here.
