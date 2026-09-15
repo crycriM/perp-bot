@@ -199,10 +199,18 @@ Keep the HB controller gate on **testnet** until its exit criteria are met.
   `margin_available` (hard → `EMERGENCY_EXIT`, soft → `DE_RISK`, `None`
   disables), threaded through `perp_bot.Position.margin_available` →
   `Keeper._tick` (9 mm-core + 3 perp-bot tests). The native `OpmsClient`
-  parses an optional `margin_available` from the positions payload; the HB
-  controller does not feed it yet (HB's HL connector doesn't expose spot
-  clearinghouse state — needs the raw-`Info` read the derisk gate already
-  does), so the HB path runs with the stop dormant for now.
+  parses an optional `margin_available` from the positions payload. **The
+  HB controller path is wired too (2026-09-15):**
+  `PerpMMController._current_margin_available()` reads the live
+  `spotClearinghouseState.tokenToAvailableAfterMaintenance` through the HB
+  connector's own rate-limited REST machinery (`_api_post`), feeds it into
+  the keeper's `Position` every control cycle, and exposes
+  `margin_health_soft`/`margin_health_hard` on the controller config
+  (defaults 0.20/0.10). Any read failure returns `None` — the stop runs
+  dormant instead of blocking the loop. Verified against the real mainnet
+  connector on `e2_mm1` (read-only: margin ∈ (0, unified balance], locked
+  in `tests_real/test_hyperliquid_mainnet_connector.py`), plus 4 offline
+  real-HB tests in `tests_real/test_perp_mm_controller_real_hb.py`.
 - ~~**Emergency latency 12.2 s vs the plan's 10 s.**~~ Resolved: 5 s child
   limit, 8.7 s measured.
 - ~~**A PA whose child is skipped still reports `COMPLETED`.**~~ **Fixed

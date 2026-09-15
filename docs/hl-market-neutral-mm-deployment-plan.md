@@ -406,9 +406,14 @@ mode, independent of each keeper's own risk policy).
   `EMERGENCY_EXIT`, soft → `DE_RISK`, `None` (venue doesn't publish it)
   disables both — threaded through `perp_bot.Position.margin_available` →
   `Keeper._tick`, and `OpmsClient` parses it from the positions payload
-  when the OPMS provides it. The HB controller path doesn't feed it yet
-  (HB's HL connector exposes no spot clearinghouse state); until it does,
-  the HB path runs with the stop dormant and only the drawdown stop active.
+  when the OPMS provides it. **The HB controller path feeds it too**:
+  `PerpMMController._current_margin_available()` reads the live
+  `spotClearinghouseState.tokenToAvailableAfterMaintenance` through the HB
+  connector's own REST machinery each control cycle (config:
+  `margin_health_soft`/`margin_health_hard`, defaults 0.20/0.10); a failed
+  read yields `None`, leaving the stop dormant rather than blocking the
+  loop. Verified read-only on mainnet `e2_mm1`
+  (`tests_real/test_hyperliquid_mainnet_connector.py`).
 - ~~**Lighter's net-vs-hedge classification**~~ — **Verified**: Lighter is
   confirmed net-mode (single signed position per market). Code is correct.
 - ~~**Post-only order support**~~ — **Verified at the venue level**: HL
