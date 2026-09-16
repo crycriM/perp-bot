@@ -11,15 +11,24 @@ from perp_bot.keeper import Keeper
 from perp_bot.opms_client import Position
 
 
+_MARGIN_NOT_SET = object()
+
+
 class FakeOpmsClient:
     """Fake OPMS client with canned snapshots + configurable position."""
 
-    def __init__(self, snapshots=None, position=0.0, equity=1000.0, margin_available=None):
+    def __init__(
+        self,
+        snapshots=None,
+        position=0.0,
+        equity=1000.0,
+        margin_available=_MARGIN_NOT_SET,
+    ):
         self.snapshots = snapshots or []
         self.sends: list[ExecIntent] = []
         self.position = position
         self.equity = equity
-        self.margin_available = margin_available
+        self.margin_available = equity if margin_available is _MARGIN_NOT_SET else margin_available
         self.resnapshot_calls = 0
         self._on_snapshot_cb = None
         self._on_fill_cb = None
@@ -215,9 +224,8 @@ async def test_keeper_de_risk_on_soft_margin_health_breach():
 
 
 @pytest.mark.asyncio
-async def test_keeper_margin_health_absent_still_quotes():
-    """No margin_available in the position snapshot (other venues / older
-    OPMS) must not change behaviour."""
+async def test_keeper_margin_health_absent_fails_closed(caplog):
+    """A missing safety input must cancel quotes and request a full flatten."""
     config = PerpPairConfig(coin="BTC", gamma=1.0, kappa=0.5)
     client = FakeOpmsClient(snapshots(drift=10.0), position=0.0, equity=1000.0, margin_available=None)
     keeper = make_keeper(client, config)
@@ -226,7 +234,23 @@ async def test_keeper_margin_health_absent_still_quotes():
     for _ in range(5):
         await keeper._tick()
 
-    assert any(s.quote is not None for s in client.sends)
+    assert client.sends
+    assert all(s.quote is None for s in client.sends)
+    assert all(s.urgency == "emergency" for s in client.sends)
+    assert "failing closed" in caplog.text
+
+
+@pytest.mark.parametrize("margin_available", ["not-a-number", float("nan"), float("inf"), float("-inf")])
+def test_position_bad_margin_health_fails_closed(margin_available, caplog):
+    pos = Position(
+        coin="BTC",
+        position=1.0,
+        equity=1000.0,
+        margin_available=margin_available,
+    )
+
+    assert pos.margin_available == 0.0
+    assert "failing closed" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -296,7 +320,8 @@ async def test_keeper_writes_jsonl_decision_log(tmp_path):
     assert len(lines) == 3
     rec = json.loads(lines[0])
     assert {"ts", "mid", "regime", "decision", "urgency",
-            "inventory", "equity", "total_pnl"} <= rec.keys()
+            "inventory", "equity", "margin_available", "total_pnl"} <= rec.keys()
+    assert rec["margin_available"] == pytest.approx(1000.0)
     assert rec["source"] == "live"
     assert rec["intent_sent"] is True
 

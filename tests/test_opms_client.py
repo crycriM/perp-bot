@@ -35,6 +35,7 @@ async def test_get_positions_hits_real_endpoints_and_merges_equity():
     position_resp = json_response({
         "venue": "hyperliquid", "coin": "BTC-USD", "side": "long",
         "quantity": "1.5", "entry_price": "50000", "unrealized_pnl": "10",
+        "margin_available": "750.0",
     })
     equity_resp = json_response({"exchange": "hyperliquid", "account_id": "default", "equity": "1000.0"})
 
@@ -55,6 +56,31 @@ async def test_get_positions_hits_real_endpoints_and_merges_equity():
     assert "BTC" in positions
     assert positions["BTC"].position == pytest.approx(1.5)
     assert positions["BTC"].equity == pytest.approx(1000.0)
+    assert positions["BTC"].margin_available == pytest.approx(750.0)
+
+
+@pytest.mark.asyncio
+async def test_get_positions_bad_margin_health_fails_closed(caplog):
+    client = make_client()
+    mock_session = AsyncMock()
+    mock_session.closed = False
+    mock_session.get = lambda url: (
+        json_response({"equity": "500.0"})
+        if "equity" in url else
+        json_response({
+            "side": "long",
+            "quantity": "2.0",
+            "entry_price": "1",
+            "unrealized_pnl": "0",
+            "margin_available": "not-a-number",
+        })
+    )
+    client._session = mock_session
+
+    positions = await client.get_positions()
+
+    assert positions["BTC"].margin_available == 0.0
+    assert "failing closed" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -65,7 +91,10 @@ async def test_get_positions_short_side_is_negative():
     mock_session.get = lambda url: (
         json_response({"exchange": "hyperliquid", "account_id": "default", "equity": "500.0"})
         if "equity" in url else
-        json_response({"side": "short", "quantity": "2.0", "entry_price": "1", "unrealized_pnl": "0"})
+        json_response({
+            "side": "short", "quantity": "2.0", "entry_price": "1",
+            "unrealized_pnl": "0", "margin_available": "400.0",
+        })
     )
     client._session = mock_session
 
@@ -93,7 +122,10 @@ async def test_resnapshot_positions_calls_get_positions():
     mock_session.closed = False
     mock_session.get = lambda url: (
         json_response({"equity": "1000.0"}) if "equity" in url else
-        json_response({"side": "long", "quantity": "0.0", "entry_price": "0", "unrealized_pnl": "0"})
+        json_response({
+            "side": "long", "quantity": "0.0", "entry_price": "0",
+            "unrealized_pnl": "0", "margin_available": "1000.0",
+        })
     )
     client._session = mock_session
 
