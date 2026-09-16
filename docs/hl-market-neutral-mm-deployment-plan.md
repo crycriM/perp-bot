@@ -410,9 +410,12 @@ mode, independent of each keeper's own risk policy).
   `PerpMMController._current_margin_available()` reads the live
   `spotClearinghouseState.tokenToAvailableAfterMaintenance` through the HB
   connector's own REST machinery each control cycle (config:
-  `margin_health_soft`/`margin_health_hard`, defaults 0.20/0.10); a failed
-  read yields `None`, leaving the stop dormant rather than blocking the
-  loop. Verified read-only on mainnet `e2_mm1`
+  `margin_health_soft`/`margin_health_hard`, defaults 0.20/0.10). Margin data
+  now uses the shared `fail_closed_margin_available` invariant: failed, missing,
+  malformed, or non-finite reads are logged at critical severity and become a
+  zero-margin hard breach, forcing `EMERGENCY_EXIT`. Decision logs and replay
+  carry the validated value and configured thresholds. Verified
+  read-only on mainnet `e2_mm1`
   (`tests_real/test_hyperliquid_mainnet_connector.py`).
 - ~~**Lighter's net-vs-hedge classification**~~ — **Verified**: Lighter is
   confirmed net-mode (single signed position per market). Code is correct.

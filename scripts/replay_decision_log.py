@@ -3,17 +3,17 @@ standalone Keeper and diff the two.
 
 The HB-hosted `PerpMMController` (shadow mode) writes one decision record per
 control cycle with the exact inputs it fed the keeper: `ts`, `mid`, `inventory`
-(venue position after reconciliation), `equity`. This script feeds those same
-inputs, in order, to a bare `perp_bot.keeper.Keeper` — no Hummingbot, no
-InProcessClient — and compares the resulting records with
-`diff_decision_logs.compare`. Replaying the recorded inputs keeps the comparison
-deterministic: two live processes would tick at different instants and the diff
-would measure timing jitter, not hosting.
+(venue position after reconciliation), `equity`, and the validated
+`margin_available`. This script feeds those same inputs, in order, to a bare
+`perp_bot.keeper.Keeper` — no Hummingbot, no InProcessClient — and compares the
+resulting records with `diff_decision_logs.compare`. Replaying the recorded
+inputs keeps the comparison deterministic: two live processes would tick at
+different instants and the diff would measure timing jitter, not hosting.
 
 Known, accounted-for delta: the decision record does not carry the funding rate,
 so the replay accrues no funding and `total_pnl` differs. `total_pnl` is not a
 compared field, and funding cannot change a decision (RiskPolicy reads equity,
-inventory, regime and markout only).
+inventory, margin health, regime and markout only).
 
 Usage:
   python scripts/replay_decision_log.py <controller.yml> <hb_decisions.jsonl> [--out replay.jsonl]
@@ -28,6 +28,7 @@ from pathlib import Path
 import yaml
 
 from mm_core.inventory import Caps
+from mm_core.risk_policy import RiskConfig
 
 from perp_bot.config import PerpPairConfig
 from perp_bot.keeper import Keeper
@@ -64,6 +65,10 @@ def pair_config(controller: dict) -> PerpPairConfig:
         account_id=controller.get("account_id", "default"),
         caps=Caps(max_position=float(controller.get("max_position", 10.0)),
                   critical_position=float(controller.get("critical_position", 20.0))),
+        risk=RiskConfig(
+            margin_health_soft=float(controller.get("margin_health_soft", 0.20)),
+            margin_health_hard=float(controller.get("margin_health_hard", 0.10)),
+        ),
     )
 
 
@@ -73,7 +78,14 @@ async def replay(controller: dict, records: list[dict], out: Path) -> None:
     out.unlink(missing_ok=True)
     keeper = Keeper(client, config, decision_log_path=str(out), shadow_mode=True)
     for rec in records:
-        client.positions = {config.coin: Position(coin=config.coin, position=rec["inventory"], equity=rec["equity"])}
+        client.positions = {
+            config.coin: Position(
+                coin=config.coin,
+                position=rec["inventory"],
+                equity=rec["equity"],
+                margin_available=rec.get("margin_available"),
+            )
+        }
         await keeper._on_snapshot({"ts": rec["ts"], "mid": rec["mid"], "funding_rate": None})
         await keeper._tick()
     await keeper.stop()

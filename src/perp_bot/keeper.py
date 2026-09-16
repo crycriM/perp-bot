@@ -16,6 +16,7 @@ from mm_core.as_core import gueant_half_spread, gueant_reservation_price
 from mm_core.vol import VOLATILITY_MODELS
 
 from perp_bot.config import PerpPairConfig
+from perp_bot.margin_health import fail_closed_margin_available
 from perp_bot.opms_client import OpmsClient
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ class DecisionRecord:
     urgency: str
     inventory: float
     equity: float
+    margin_available: float
     total_pnl: float
     intent_sent: bool
     intent: ExecIntent | None
@@ -121,7 +123,7 @@ class Keeper:
             self._reconcile_pnl_position(pos.position)
             self._inventory.position = pos.position
             self._equity = pos.equity
-            self._margin_available = getattr(pos, "margin_available", None)
+            self._margin_available = pos.margin_available
 
     def _reconcile_pnl_position(self, opms_position: float) -> None:
         """A missed fill (dropped websocket message, restart) leaves the
@@ -176,7 +178,10 @@ class Keeper:
             self._apply_positions(positions)
             if positions.get(coin) is None:
                 self._equity = 1.0
-                self._margin_available = None
+                self._margin_available = fail_closed_margin_available(
+                    None,
+                    source=f"missing OPMS position snapshot for {coin}",
+                )
 
             prices = [p for _, p in self._mid_history]
             regime = evaluate_regime(list(self._mid_history))
@@ -207,6 +212,7 @@ class Keeper:
                 decision=decision.value, urgency=urgency,
                 inventory=self._inventory.position,
                 equity=self._equity,
+                margin_available=self._margin_available,
                 total_pnl=total_pnl,
                 intent_sent=intent_sent,
                 intent=intent,

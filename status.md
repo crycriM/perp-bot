@@ -206,10 +206,13 @@ Keep the HB controller gate on **testnet** until its exit criteria are met.
   connector's own rate-limited REST machinery (`_api_post`), feeds it into
   the keeper's `Position` every control cycle, and exposes
   `margin_health_soft`/`margin_health_hard` on the controller config
-  (defaults 0.20/0.10). Any read failure returns `None` — the stop runs
-  dormant instead of blocking the loop. Verified against the real mainnet
+  (defaults 0.20/0.10). As of 2026-09-16, failed, missing, malformed, or
+  non-finite reads are logged at critical severity and fail closed as a
+  zero-margin hard breach; the stop requests `EMERGENCY_EXIT` rather than
+  going dormant. Decision logs and replay now preserve the validated reading
+  and the configured thresholds. Verified against the real mainnet
   connector on `e2_mm1` (read-only: margin ∈ (0, unified balance], locked
-  in `tests_real/test_hyperliquid_mainnet_connector.py`), plus 4 offline
+  in `tests_real/test_hyperliquid_mainnet_connector.py`), plus 5 offline
   real-HB tests in `tests_real/test_perp_mm_controller_real_hb.py`.
 - ~~**Emergency latency 12.2 s vs the plan's 10 s.**~~ Resolved: 5 s child
   limit, 8.7 s measured.

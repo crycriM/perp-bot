@@ -259,6 +259,13 @@ For **C4.2 shadow**, use the same keeper path with `shadow_mode=True`: intents
 are fully computed and written into the decision log, but they are **not**
 posted to OPMS. The helper script runs this mode for a bounded window:
 
+Margin health is fail-closed on every live and replayed position snapshot.
+Missing, malformed, or non-finite `margin_available` values are logged at
+critical severity and treated as zero available margin, producing an
+`EMERGENCY_EXIT` instead of silently disabling the stop. Decision logs persist
+the validated reading so `replay_decision_log.py` can reproduce the configured
+soft/hard margin thresholds exactly.
+
 ```bash
 python scripts/run_shadow.py BTC \
   --exchange hyperliquid \

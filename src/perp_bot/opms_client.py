@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import aiohttp
 
+from perp_bot.margin_health import fail_closed_margin_available
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -15,8 +17,15 @@ class Position:
     equity: float
     # Venue-computed liquidation-distance balance (HL unified accounts:
     # spotClearinghouseState.tokenToAvailableAfterMaintenance = spot total −
-    # crossMaintenanceMarginUsed). None when the venue/OPMS doesn't publish it.
+    # crossMaintenanceMarginUsed). Invalid/missing readings fail closed to
+    # zero so the risk policy requests an emergency exit.
     margin_available: float | None = None
+
+    def __post_init__(self) -> None:
+        self.margin_available = fail_closed_margin_available(
+            self.margin_available,
+            source=f"position snapshot for {self.coin}",
+        )
 
 class OpmsClient:
     """REST + WS client for the OPMS with reconnect and resnapshot-on-reconnect.
@@ -84,10 +93,9 @@ class OpmsClient:
         equity = await self._get_equity()
         quantity = float(data["quantity"])
         signed = quantity if data["side"] == "long" else -quantity
-        margin_available = data.get("margin_available")
         self._positions = {self.coin: Position(
             coin=self.coin, position=signed, equity=equity,
-            margin_available=float(margin_available) if margin_available is not None else None,
+            margin_available=data.get("margin_available"),
         )}
         return self._positions
 
