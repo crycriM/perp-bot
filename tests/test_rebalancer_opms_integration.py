@@ -78,11 +78,13 @@ def _drifted_configs() -> list[PerpPairConfig]:
     return [
         PerpPairConfig(
             coin="ETH", exchange="mock", account_id="mm-a",
-            target_inventory=0.4, caps=Caps(max_position=1.0, critical_position=2.0),
+            target_inventory=0.4, leverage=3,
+            caps=Caps(max_position=1.0, critical_position=2.0),
         ),
         PerpPairConfig(
             coin="SOL", exchange="mock", account_id="mm-a",
-            target_inventory=-4.0, caps=Caps(max_position=10.0, critical_position=20.0),
+            target_inventory=-4.0, leverage=3,
+            caps=Caps(max_position=10.0, critical_position=20.0),
         ),
     ]
 

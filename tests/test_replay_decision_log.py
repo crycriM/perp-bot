@@ -25,6 +25,12 @@ def test_pair_config_preserves_margin_health_thresholds():
     assert config.risk.margin_health_hard == pytest.approx(0.10)
 
 
+def test_pair_config_preserves_structural_tilt():
+    config = pair_config({**controller_config(), "target_inventory": -4.0})
+
+    assert config.target_inventory == pytest.approx(-4.0)
+
+
 @pytest.mark.asyncio
 async def test_replay_preserves_margin_health_decision(tmp_path):
     out = tmp_path / "replay.jsonl"

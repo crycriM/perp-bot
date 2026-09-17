@@ -36,11 +36,12 @@ class RebalanceConfig:
     portfolio_net_threshold: float = 0.05
     cycle_interval_s: float = 600.0
     passive_aggressive: bool = True
-    # Plan §1.4 sizing: gross notional ≈ 2.5x equity at 3x leverage with
-    # buffers. A correction that would push the account past this is not
-    # proposed at all — underfunded accounts must not be market-ordered up
-    # to their structural tilt (live finding 2026-09-15).
+    # Plan §1.4 sizing: at the reference leverage, gross notional is capped
+    # at 2.5x equity with buffers. The guard below converts that allowance to
+    # initial margin using each pair's configured leverage, so a correction
+    # can use higher leverage when the account has less collateral.
     max_gross_notional_multiple: float = 2.5
+    reference_leverage: float = 3.0
 
 
 @dataclass
@@ -115,29 +116,54 @@ class BasketRebalancer:
 
         by_account = self._account_configs()
         for account_id, cfgs in by_account.items():
-            imbalance, equity = await self.compute_imbalance(account_id)
+            # One snapshot of the account's book: position, equity and price are
+            # read once per coin and reused for the imbalance gate, the book and
+            # the capacity guard — a fill landing mid-cycle cannot desync two
+            # separate reads, and live I/O is not doubled.
+            book: list[tuple[PerpPairConfig, float, float, float]] = []
+            imbalance = 0.0
+            equity = 0.0
+            gross = 0.0
+            projected_initial_margin = 0.0
+            for cfg in cfgs:
+                position, acct_equity = await self.position_provider(account_id, cfg.coin)
+                price = await self.price_provider(cfg.coin)
+                equity = acct_equity
+                gross += abs(position) * price
+                leverage = max(float(getattr(cfg, "leverage", 1)), 1.0)
+                projected_initial_margin += abs(cfg.target_inventory) * price / leverage
+                drift = position - cfg.target_inventory
+                imbalance += drift * price
+                if abs(drift * price) >= 1e-6:
+                    book.append((cfg, position, price, drift))
+
             imbalance_pct = abs(imbalance) / equity if equity > 0 else 0.0
             if imbalance_pct <= self.cfg.imbalance_pct_threshold:
                 continue
 
-            # One snapshot of the account's book, then decide all-or-none.
-            book: list[tuple[PerpPairConfig, float, float, float]] = []
-            gross = 0.0
-            for cfg in cfgs:
-                position, _ = await self.position_provider(account_id, cfg.coin)
-                price = await self.price_provider(cfg.coin)
-                gross += abs(position) * price
-                drift = position - cfg.target_inventory
-                if abs(drift * price) >= 1e-6:
-                    book.append((cfg, position, price, drift))
-
-            proposed = sum(abs(drift) * price for _, _, price, drift in book)
-            budget = equity * self.cfg.max_gross_notional_multiple
-            if gross + proposed > budget:
+            # Projected gross after the correction lands: each corrected leg ends
+            # at its target, so it removes the drift-sized exposure rather than
+            # adding |drift| on top of the current gross. `gross + |drift|`
+            # double-counts and blocks exactly the de-risking correction the
+            # imbalance trigger exists to make (review 2026-09-16 #1).
+            reduced = sum(abs(position) * price for _, position, price, _ in book)
+            landed = sum(abs(cfg.target_inventory) * price for cfg, _, price, _ in book)
+            projected_gross = gross - reduced + landed
+            margin_budget = equity * (
+                self.cfg.max_gross_notional_multiple / self.cfg.reference_leverage
+            )
+            # A correction that reduces gross exposure is always useful even
+            # if the already-open book is above the configured margin budget.
+            # Only block a correction that would add exposure and require more
+            # initial margin than the account's buffered collateral allows.
+            if projected_gross > gross and projected_initial_margin > margin_budget:
                 logger.warning(
-                    f"{account_id}: capacity guard — gross ${gross:.2f} + correction "
-                    f"${proposed:.2f} exceeds {self.cfg.max_gross_notional_multiple:.1f}x "
-                    f"equity ${equity:.2f}; no correction sent"
+                    f"{account_id}: capacity guard — projected initial margin "
+                    f"${projected_initial_margin:.2f} exceeds "
+                    f"${margin_budget:.2f} ({self.cfg.max_gross_notional_multiple:.1f}x "
+                    f"gross allowance at {self.cfg.reference_leverage:.1f}x) on "
+                    f"${equity:.2f} equity; projected gross ${projected_gross:.2f}; "
+                    "no correction sent"
                 )
                 for cfg, position, _, _ in book:
                     record = RebalanceRecord(

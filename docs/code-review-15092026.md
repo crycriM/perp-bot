@@ -1,0 +1,7 @@
+Review: `perp-bot` (`21a2e85..HEAD`)
+
+1. **`rebalancer.py:134`** — capacity guard computes `gross + proposed`, which double-counts when a trade is *reducing* an overshot position — can block exactly the de-risking correction the imbalance trigger exists to make.
+2. **`replay_decision_log.py:76`** — replay never populates `margin_available` or maps `margin_health_soft/hard` into `RiskConfig`, so margin-health stops (new this diff, live on the HB side) are silently disabled in replay — parity-diffing will misreport real HB divergences as tooling noise.
+3. **`rebalancer.py:118`** — position/price fetched twice per cycle (once for imbalance gate, once for capacity guard) despite a comment claiming "one snapshot" — a fill landing in between desyncs the two reads and doubles live I/O.
+4. **`opms_client.py:87`** — `margin_available` only null-checked before `float()`; a non-numeric value either raises (killing the tick) or becomes `nan`, which compares `False` against every threshold — silently disabling the margin-health stop with no log.
+5. **`keeper.py:124`** (minor) — `getattr(pos, "margin_available", None)` is unneeded; the dataclass always has the field, and the fallback would mask a real `AttributeError` from a malformed caller.

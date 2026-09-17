@@ -63,6 +63,7 @@ def pair_config(controller: dict) -> PerpPairConfig:
         widen_factor=float(controller.get("widen_factor", 2.0)),
         exchange=controller["venue"],
         account_id=controller.get("account_id", "default"),
+        target_inventory=float(controller.get("target_inventory", 0.0)),
         caps=Caps(max_position=float(controller.get("max_position", 10.0)),
                   critical_position=float(controller.get("critical_position", 20.0))),
         risk=RiskConfig(

@@ -152,6 +152,12 @@ correlation. Concretely:
   other's. True up collateral between them on a fixed cadence (e.g. weekly)
   rather than assuming symmetry holds indefinitely.
 
+The $2,000 figure in the worked example is for carrying the **full calibrated
+caps** at the illustrative 3x leverage. It is not the collateral required for
+the smaller structural target. For the currently funded accounts, the target
+is configured at 6x and the leverage-aware rebalancer budgets initial margin
+against the live equity.
+
 ### 1.5 Netting / rebalancing controller — **Implemented** (`perp_bot.rebalancer.BasketRebalancer`)
 
 Reuse the "imbalance" framing already used elsewhere in this shop's tooling
@@ -317,12 +323,13 @@ WS trade-stream logger run for the fetch window.
 
 ## 3. Order & inventory management
 
-Unchanged from the general plan (`Caps` sizing from equity/leverage, fixed
-10%/5% per-side quote sizing in `Keeper._actuate`, `tick_s>=5` against a real
-venue) — with the addition that, for tilted instances, `Caps` bounds are
-now interpreted relative to `q*` (§1.3), and the portfolio netting job (§1.5)
-is a second, slower control loop layered on top of each keeper's own
-`RiskPolicy`.
+The nominal quote sizes remain 10%/5% of `max_position`, but
+`Keeper._actuate` now clips each side so one full fill stays inside the cap,
+the target-moving side cannot cross structural `q*`, and a reducing side
+cannot flip through flat. OPMS sends reducing quotes venue-side reduce-only.
+For tilted instances, `Caps` bounds are interpreted relative to `q*` (§1.3),
+and the portfolio netting job (§1.5) is a second, slower control loop layered
+on top of each keeper's own `RiskPolicy`.
 
 ## 4. Wiring / config — **Basket config ready** (`scripts/basket_config.py`)
 
@@ -340,14 +347,26 @@ Four `PerpPairConfig` instances (one per coin per subaccount), callable via
 for this shape; the missing structural-tilt mechanism (§1.3) was, and it's now
 implemented.
 
-**Collateral sizing** (per subaccount, cross margin @ 3x leverage, no portfolio
-discount per §1.4):
-- ETH notional at cap: 1.0 × $3000 = $3000
-- SOL notional at cap: 10.0 × $150 = $1500
-- Gross notional: $4500
-- Maintenance margin (approx): $1500
-- With basis + operational buffers (20%): $1800
-- **Recommended initial funding: $2000 USDC per subaccount** (conservative)
+The real-Hummingbot deployment mirrors the basket with two controller
+configuration files per instance: `opms_perp_mm_e2_mm1_shadow.yml` targets
+`e2_mm1` with ETH `+0.4` / SOL `-4.0`, and
+`opms_perp_mm_e2_mm2_shadow.yml` targets `e2_mm2` with the opposite tilts.
+`PerpMMControllerConfig.target_inventory` passes each YAML tilt into the
+keeper's `PerpPairConfig`; the configured leverage is passed through as well.
+`deploy/hummingbot/scripts/validate_hb_deploy_configs.py` loads both files
+through Hummingbot's loader and checks topology, targets, 6x leverage, 5-second
+shadow cadence, and credential routing.
+
+**Collateral sizing for the currently funded accounts** (no portfolio-margin
+discount):
+- At the 2026-09-16 HL mids (ETH ~$2,402.65, SOL ~$97.28), the target is
+  `0.4 ETH + 4 SOL` in gross terms, about **$1,350 per subaccount**.
+- At the configured **6x leverage**, target initial margin is about **$225**.
+- The rebalancer's default 2.5x gross allowance at its 3x reference leverage
+  is a $250 initial-margin budget on $300 equity, so the current target fits.
+- `max_position` remains the calibrated inventory bound; it is larger than the
+  target and the HB budget checker plus rebalancer margin guard prevent a
+  $300 account from opening the full cap.
 
 ## 5. Rollout sequence
 
@@ -364,6 +383,22 @@ plan, with these basket-specific additions:
 3. Micro-mainnet: fund both subaccounts at the smallest workable size,
    validate the netting job actually fires and corrects a drift within one
    full monitoring cycle before increasing size.
+4. Before enabling dual-account writes, run a bounded single-account
+   Hummingbot soak. **Runtime completed 2026-09-16 on `e2_mm1`; the behavioral
+   safety gate failed.** The 30-minute run used the calibrated ETH/SOL
+   controllers at 6x and produced 346 ETH and 345 SOL live decision records,
+   four unique maker fills, and a maximum observed gross position of about
+   $379. The control loop kept ticking, but regime gating stopped quoting for
+   long intervals while residual positions remained open. Teardown
+   market-closed the residual ETH/SOL positions and verified zero scoped orders
+   and positions. One post-only race was rejected and retried successfully.
+   The resulting safety remediation is implemented and covered offline:
+   quote stops now cancel and flatten residual inventory with one bounded
+   reduce-only PA child; venue-order-id liveness has a 15-second watchdog and
+   30-second recovery circuit; quote refresh is cancel-then-create; controller
+   HL reads have 5-second deadlines with 429-aware exponential backoff; and
+   the bounded launchers use an MQTT-free runtime. A fresh live soak is still
+   required before this gate can pass.
 
 ## 6. Monitoring & kill switch
 
@@ -375,8 +410,8 @@ mode, independent of each keeper's own risk policy).
 
 ## 7. Known gaps to close before real capital
 
-- ~~**Structural tilt (§1.3)**~~ — **Implemented and verified** (112 mm-core +
-  45 perp-bot tests passing). `q_target` in `gueant_reservation_price`,
+- ~~**Structural tilt (§1.3)**~~ — **Implemented and verified** (121 mm-core +
+  74 perp-bot tests passing). `q_target` in `gueant_reservation_price`,
   `target_inventory` in `RiskPolicy.evaluate`, threaded through `Keeper` and
   `Backtest`. Lighter venue corrected to `position_mode="net"`.
 - ~~**Netting/rebalancing controller (§1.5)**~~ — **Implemented** (`perp_bot.rebalancer.BasketRebalancer`,
@@ -387,11 +422,19 @@ mode, independent of each keeper's own risk policy).
   tests; four basket instances mapped onto `e2_mm1`/`e2_mm2`, logs in
   `perp-bot/logs/rebalancer_shadow_*.jsonl`). It surfaced a sizing gap the unit
   tests could not: the 300 USDC accounts read ~190% imbalance and a full tilt
-  establishment would need ~$1363 vs the §1.4 budget (~2.5x equity = ~$749), so
-  a new `max_gross_notional_multiple` guard (default 2.5, per §1.4) now
-  skips-and-logs such corrections instead of proposing them (2 tests).
-  Still open: the OPMS intent feed (needs OPMS running) and a bounded
-  correction on plan-funded accounts.
+  establishment would need ~$1363 gross vs the §1.4 budget (~2.5x equity =
+  ~$749 gross at the 3x reference leverage), so a new leverage-aware
+  `max_gross_notional_multiple` guard (default 2.5, reference 3x) now
+  skips-and-logs such corrections instead of proposing them at insufficient
+  leverage (2 tests).
+  **Follow-up read-only HL run passed 2026-09-16:** concurrent real-HB
+  connector/controller smokes for `e2_mm1` and `e2_mm2` both read the correct
+  vault account, positive unified equity, and plausible funding (`8.2838e-06`);
+  a fresh live-feed shadow saw flat portfolio net exposure and emitted four
+  `capacity_guard_skip` records under the old 1x configuration. The basket is
+  now configured at 6x, so the current target fits the same $300 accounts;
+  the full calibrated caps still do not. Still open: the OPMS intent feed
+  (needs OPMS running) and a bounded correction using the 6x configuration.
 - **No portfolio-margin confirmation on HL, Aster, or Lighter** — all three
   net PnL via cross margin but none confirm a reduced margin *requirement*
   for offsetting positions; collateral must be sized for the gross sum
@@ -449,7 +492,7 @@ mode, independent of each keeper's own risk policy).
   registered its custom `passive_aggressive_executor` config with
   `ExecutorOrchestrator._executor_mapping`, and `_current_equity()` looked up
   `"USDC"` where the HL connector reports `"USD"` — all fixed and locked by
-  `hb-enhanced-opms/tests_real/` (13 real-HB tests, no stubs). The live
+  `hb-enhanced-opms/tests_real/` (35 real-HB tests, no stubs). The live
   read-only smoke (`scripts/run_hb_mainnet_smoke.py`) now runs the real
   `on_start()` + `update_processed_data()` on mainnet for `e2_mm1` (vault) and
   `e2_main` (master) with no orders, verifying FillObserver registration, mid,
@@ -462,8 +505,13 @@ mode, independent of each keeper's own risk policy).
   `1.25e-05`); patched to use `funding`. Re-apply after any Hummingbot update;
   the smoke guards it.
   ⚠ Hummingbot keys credentials by **connector name**, and there is only one
-  `hyperliquid_perpetual` slot, so running `e2_mm1` and `e2_mm2` concurrently
-  needs two HB instances (or a connector-name split) — not yet solved.
+  `hyperliquid_perpetual` slot per process. **Dual read-only startup passed
+  2026-09-16:** `deploy/run_dual_shadow_session.sh` used two disposable
+  Hummingbot runtimes and two separate encrypted stores; both `e2_mm1` and
+  `e2_mm2` started concurrently, initialized ETH and SOL, and produced fresh
+  shadow decision logs with no order executor events. The two HL vault
+  addresses are distinct. They still share one agent signer key, so concurrent
+  writes remain gated until nonce isolation is in place.
   **Live quote/cancel gate passed 2026-09-15** on `e2_mm1` and `e2_mm2`
   (`hb-enhanced-opms/scripts/run_hb_mainnet_quote_gate.py`): the real
   `PerpMMController` turned its own `QUOTE` decision into two resting 0.006 ETH
@@ -478,8 +526,10 @@ mode, independent of each keeper's own risk policy).
   after the decision). Unified-account equity was verified live to include
   unrealized PnL (HL marks the spot USDC total to market), so the drawdown stop
   is sound; `tokenToAvailableAfterMaintenance` is available if a
-  margin-health stop is wanted. Not yet covered: the two legs running
-  concurrently — see `perp-bot/status.md`.
+  margin-health stop is wanted. **Concurrent read-only smokes passed
+  2026-09-16** for both basket subaccounts; concurrent order execution remains
+  untested because the accounts still share one agent signer and HB has one
+  `hyperliquid_perpetual` credential slot. See `perp-bot/status.md`.
 - ~~**Raw mainnet subaccount routing**~~ — **Proven 2026-09-14** (raw HL SDK):
   `hb-enhanced-opms/tests_live/` ran 30/30 on HL mainnet; orders signed with
   `vault_address=<subaccount>` rest only on that subaccount and are invisible
@@ -491,9 +541,89 @@ mode, independent of each keeper's own risk policy).
 - ~~**Historical data fetch**~~ — **Completed**: 30 days of ETH/SOL 15m candles
   fetched via `scripts/fetch_hl_data_v2.py` (direct REST API, bypasses SDK init
   issues). Data in `perp-bot/data/`. Backtest calibration done (§2).
-- **Live integration testing** — the HB quote path is now proven live
-  (above); the rebalancer still needs testing with real position/price feeds
-  before relying on it for capital.
+- **Live integration testing** — the HB quote path is proven live (above), the
+  real two-instance basket launcher plus position/price feeds are covered in
+  read-only shadow mode, and the single-account `e2_mm1` run completed its
+  runtime and cleanup checks. Its behavioral safety gate failed: regime stops
+  left positions unquoted for minutes. The quote-stop flatten, quote-liveness
+  watchdog, target/flat fill bounds, MQTT isolation, and bounded timeout/429
+  circuits are now implemented and tested offline in both execution seams
+  where applicable. Execution through a running native OPMS and a live rerun
+  of the failed soak remain open before relying on the rebalancer for capital.
 - Everything listed in the general deployment plan's gaps section (leverage
-  set manually on HL, backtest's hardcoded `liquidations=0` gate, synthetic
-  candle-derived backtest trades) still applies per-instance here.
+  tier selection per instance, backtest's hardcoded `liquidations=0` gate,
+  synthetic candle-derived backtest trades) still applies per-instance here.
+
+### 7.1 Gap audit — 2026-09-16
+
+The remaining items were checked against the implementation, local tests, and
+the live HL run above:
+
+- **Closed:** structural tilt, venue-mode classification, post-only routing,
+  subaccount routing, historical data/calibration, margin-health fail-closed
+  handling, real-HB quote/fill/de-risk/emergency paths, dual real-HB shadow
+  startup/config loading, live position/mid feeds for the rebalancer, and the
+  single-account runtime startup/cleanup path on `e2_mm1`.
+- **Soak evidence:** `hb-enhanced-opms/logs/live_soak_20260916T132141/` records
+  1,800 seconds of live operation. The monitor observed maximum gross exposure
+  of $379.29, maximum initial margin of $63.22, minimum margin health of
+  98.83%, and maximum six scoped resting orders. Four maker orders filled
+  during the run; one post-only price race was rejected and retried. Cleanup
+  market-closed 0.0231 ETH and 2 SOL, leaving $729.33 USDC with zero ETH/SOL
+  orders and positions.
+- **Implemented offline; live rerun pending — quote liveness and position
+  safety, found in this soak:** SOL
+  stopped quoting at 13:24:51 with a -2 SOL position and again at 13:33:06;
+  ETH stopped at 13:25:29 with +0.0769 ETH, briefly resumed, then stopped at
+  13:27:36 with -0.0231 ETH until cleanup. ETH only had two short quote
+  windows around 13:39 and a final window around 13:50. The decision logs
+  continued at roughly the 5-second cadence (maximum gaps about 8.2 seconds
+  for ETH and 9.0 seconds for SOL), so these were intentional regime-gate
+  stops rather than a dead controller. `STOP_QUOTING` previously cancelled
+  orders but left the current position untouched. It now targets flat through
+  one reduce-only PA child with a 15-second passive deadline; quote sides are
+  size-clipped at structural `q*` and flat, and both OPMS bodies carry the
+  reduce-only flag to the venue. The HB controller now requires actual venue
+  order ids, trips after 15 seconds missing, cools down for 30 seconds, and
+  refreshes quotes in two phases so old and new capped quotes never overlap.
+  The worst marked loss was about -$2.65 before
+  fees, driven by the unquoted SOL and ETH positions; final realized PnL and
+  fees left the account $2.395934 below the preflight balance.
+- **Implemented offline; fault injection and live rerun pending — venue fault
+  handling:** the launcher logs contain no confirmed HL
+  429/rate-limit or HTTP timeout during this run, and one post-only race was
+  retried. The optional MQTT bridge did produce repeated connection refusals
+  and 30-second connection timeouts. That did not stop the decision loop, but
+  the soak does not prove bounded handling for HL/API rate limits, transport
+  timeouts, or reconnect isolation. Controller-owned HL reads and the native
+  HL adapter now have explicit 5-second request deadlines, exponential
+  backoff, immediate 429 circuit opening (including `Retry-After`), and
+  fail-safe cancel/flatten behavior. The deployment launcher bypasses HB's
+  MQTT-coupled headless loop and shuts the trading core down directly on
+  SIGINT/SIGTERM. Unit tests inject timeout and 429 failures; a live fault or
+  soak rerun is still required for operational evidence.
+- **Verified:** with the basket set to 6x, the leverage-aware capacity guard
+  accepts the current ~$1,350 target gross on each $300 account while keeping
+  the target initial margin below the buffered allowance. The larger
+  calibrated caps still require more collateral or smaller caps.
+- **Still open:** run the rebalancer's `ExecIntent` path against a running
+  native OPMS and observe a bounded correction; import credentials into the
+  persistent production HB stores; rerun the single-account soak with the new
+  quote-stop/liveness/fault containment; and run the two instances with writes
+  after signer nonce isolation is complete.
+- **Still open:** split the shared agent signer keys before concurrent writes;
+  obtain isolated HL testnet credentials for the dedicated Phase-2 gate; finish
+  PA-V2 execution replay/parity; complete the one-week native-oracle shadow;
+  and add an explicit real-connector trading-rules assertion.
+- **Accepted deployment constraints:** no portfolio-margin discount is assumed
+  for HL; 6x leverage is configured for the current $300 target accounts and
+  must stay within the venue's per-asset tier; the backtest liquidation metric
+  remains hardcoded to zero; and the basket replay is candle-derived rather
+  than tick replay. These are risk disclosures, not evidence that the
+  corresponding gaps are closed.
+
+The next HL write test is a bounded `e2_mm1` safety-soak rerun. The subsequent
+dual-account write is gated on separate agent wallets and independent HB
+credential slots: a concurrent two-leg micro quote/cancel test, followed by a
+seeded, bounded rebalancer correction through OPMS. The prior single-account
+soak does not close that dual-write gate.

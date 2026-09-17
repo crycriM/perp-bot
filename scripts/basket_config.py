@@ -9,13 +9,13 @@ Subaccount structure (per deployment plan §1.2):
 - basket_a: ETH tilt long (+0.4), SOL tilt short (-4.0)
 - basket_b: ETH tilt short (-0.4), SOL tilt long (+4.0)
 
-Collateral sizing per §1.4 (cross margin, no portfolio discount):
-- ETH notional at cap: 1.0 * $3000 = $3000
-- SOL notional at cap: 10.0 * $150 = $1500
-- Total gross notional per subaccount: $4500
-- At 3x leverage, maintenance margin ≈ $4500 / 3 = $1500
-- Add basis buffer + operational buffer (20%): $1500 * 1.2 = $1800
-- Recommended initial funding: $2000 USDC per subaccount (conservative)
+Collateral sizing for the currently funded accounts:
+- The configured target is about $1350 gross per subaccount at current prices.
+- At 6x leverage, target initial margin is about $225.
+- The rebalancer keeps target margin at or below 83.3% of equity by default.
+- The max_position caps remain calibrated inventory bounds; the HB budget
+  checker and rebalancer margin guard prevent an underfunded account from
+  opening the full caps.
 """
 
 from mm_core.inventory import Caps
@@ -38,6 +38,7 @@ def get_basket_configs() -> list[PerpPairConfig]:
     sol_max_pos = 10.0
     sol_critical = 20.0
     sol_q_star = 4.0  # 40% of max_position
+    basket_leverage = 6  # target margin fits the current ~$300 per account with buffer
     
     configs = [
         # Sub A: ETH long tilt, SOL short tilt
@@ -48,6 +49,7 @@ def get_basket_configs() -> list[PerpPairConfig]:
             gamma=eth_gamma,
             kappa=eth_kappa,
             target_inventory=eth_q_star,
+            leverage=basket_leverage,
             caps=Caps(max_position=eth_max_pos, critical_position=eth_critical),
         ),
         PerpPairConfig(
@@ -57,6 +59,7 @@ def get_basket_configs() -> list[PerpPairConfig]:
             gamma=sol_gamma,
             kappa=sol_kappa,
             target_inventory=-sol_q_star,
+            leverage=basket_leverage,
             caps=Caps(max_position=sol_max_pos, critical_position=sol_critical),
         ),
         # Sub B: ETH short tilt, SOL long tilt (mirror)
@@ -67,6 +70,7 @@ def get_basket_configs() -> list[PerpPairConfig]:
             gamma=eth_gamma,
             kappa=eth_kappa,
             target_inventory=-eth_q_star,
+            leverage=basket_leverage,
             caps=Caps(max_position=eth_max_pos, critical_position=eth_critical),
         ),
         PerpPairConfig(
@@ -76,6 +80,7 @@ def get_basket_configs() -> list[PerpPairConfig]:
             gamma=sol_gamma,
             kappa=sol_kappa,
             target_inventory=sol_q_star,
+            leverage=basket_leverage,
             caps=Caps(max_position=sol_max_pos, critical_position=sol_critical),
         ),
     ]
@@ -99,13 +104,11 @@ def print_basket_summary():
         print(f"    target_inventory={cfg.target_inventory:+.1f}")
         print(f"    max_position={cfg.caps.max_position}, critical_position={cfg.caps.critical_position}")
     print()
-    print("Collateral sizing (per subaccount, cross margin @ 3x leverage):")
-    print("  ETH notional at cap: 1.0 * $3000 = $3000")
-    print("  SOL notional at cap: 10.0 * $150 = $1500")
-    print("  Gross notional: $4500")
-    print("  Maintenance margin (approx): $1500")
-    print("  With buffers (20%): $1800")
-    print("  Recommended funding: $2000 USDC per subaccount")
+    print("Collateral sizing (per subaccount, cross margin @ 6x leverage):")
+    print("  Current target gross notional: ~$1350")
+    print("  Target initial margin: ~$225")
+    print("  Current funding: ~$300 USDC per subaccount")
+    print("  Target margin utilization: ~75%")
     print()
     print("Rebalancing controller:")
     print("  imbalance_pct_threshold: 18%")

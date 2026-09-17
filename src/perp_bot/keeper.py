@@ -246,38 +246,52 @@ class Keeper:
         if decision == Decision.QUOTE:
             r = gueant_reservation_price(mid, pos, gamma, sigma, kappa, q_target=q_target)
             hs = gueant_half_spread(gamma, sigma, kappa)
+            bid_size, ask_size = self._bounded_quote_sizes(
+                pos, q_target, self._inventory.caps().max_position * 0.1
+            )
             return ExecIntent(
                 venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
-                target_inventory=pos,
+                target_inventory=q_target,
                 current_inventory=pos,
                 quote=QuoteSpec(
-                    bid_price=r - hs, ask_price=r + hs,
-                    bid_size=self._inventory.caps().max_position * 0.1,
-                    ask_size=self._inventory.caps().max_position * 0.1,
+                    bid_price=r - hs if bid_size > 0 else None,
+                    ask_price=r + hs if ask_size > 0 else None,
+                    bid_size=bid_size,
+                    ask_size=ask_size,
                 ),
                 urgency=urgency,
             )
         elif decision == Decision.WIDEN:
             r = gueant_reservation_price(mid, pos, gamma, sigma, kappa, q_target=q_target)
             hs = gueant_half_spread(gamma, sigma, kappa) * self.config.widen_factor
+            bid_size, ask_size = self._bounded_quote_sizes(
+                pos, q_target, self._inventory.caps().max_position * 0.05
+            )
             return ExecIntent(
                 venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
-                target_inventory=pos,
+                target_inventory=q_target,
                 current_inventory=pos,
                 quote=QuoteSpec(
-                    bid_price=r - hs, ask_price=r + hs,
-                    bid_size=self._inventory.caps().max_position * 0.05,
-                    ask_size=self._inventory.caps().max_position * 0.05,
+                    bid_price=r - hs if bid_size > 0 else None,
+                    ask_price=r + hs if ask_size > 0 else None,
+                    bid_size=bid_size,
+                    ask_size=ask_size,
                 ),
                 urgency=urgency,
             )
         elif decision == Decision.STOP_QUOTING:
+            # A stopped market cannot work a maker fill back out. Flatten the
+            # residual rather than holding it unquoted for an unbounded time.
+            # The execution layer maps ``immediate`` to a bounded reduce-only
+            # passive/aggressive close, so this can never add exposure toward
+            # the structural tilt or flip the position through flat.
             return ExecIntent(
                 venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
-                target_inventory=pos,
+                target_inventory=0.0,
                 current_inventory=pos,
                 quote=None,
                 urgency=urgency,
+                strategy_hint="passive_aggressive",
             )
         elif decision == Decision.DE_RISK:
             return ExecIntent(
@@ -298,3 +312,46 @@ class Keeper:
                 strategy_hint="twap",
             )
         return None
+
+    def _bounded_quote_sizes(
+        self, position: float, target: float, nominal_size: float
+    ) -> tuple[float, float]:
+        """Return quote sizes whose *single full fill* stays inside safety bounds.
+
+        Inventory is capped relative to the structural target.  The quote that
+        moves inventory toward that target is additionally clipped to land on
+        it, never jump across it.  For a directional structural leg, the
+        opposite quote is clipped at flat as well; the execution layer also
+        marks that side reduce-only to protect against stale overlapping
+        orders and position-cache lag.
+        """
+        cap = self._inventory.caps().max_position
+        lower = target - cap
+        upper = target + cap
+        bid_size = min(nominal_size, max(upper - position, 0.0))
+        ask_size = min(nominal_size, max(position - lower, 0.0))
+
+        if position < target:
+            bid_size = min(bid_size, target - position)
+        elif position > target:
+            ask_size = min(ask_size, position - target)
+
+        # An inventory-reducing maker order is sent reduce-only by the
+        # execution layer. Cap it to the position it can actually close, both
+        # to avoid venue rejection and to preserve the current sign. This
+        # closed the live-soak failure where +0.0769 ETH was followed by a
+        # 0.1 ETH ask fill, leaving an unintended -0.0231 ETH position.
+        if position > 0:
+            ask_size = min(ask_size, position)
+        elif position < 0:
+            bid_size = min(bid_size, -position)
+        if target > 0 and position <= 0:
+            ask_size = 0.0
+        elif target < 0 and position >= 0:
+            bid_size = 0.0
+
+        epsilon = 1e-12
+        return (
+            0.0 if bid_size < epsilon else bid_size,
+            0.0 if ask_size < epsilon else ask_size,
+        )

@@ -5,6 +5,7 @@ import pytest
 
 from mm_core.contracts import ExecIntent
 from mm_core.inventory import Caps
+from mm_core.risk_policy import Decision
 
 from perp_bot.config import PerpPairConfig
 from perp_bot.keeper import Keeper
@@ -173,6 +174,70 @@ async def test_keeper_de_risk_targets_structural_tilt_not_zero():
     de_risk = [s for s in client.sends if s.quote is None and s.urgency != "emergency"]
     assert de_risk, f"expected a de-risk intent, got {client.sends}"
     assert de_risk[-1].target_inventory == pytest.approx(9.0)
+
+
+@pytest.mark.asyncio
+async def test_keeper_quote_stop_flattens_residual_inventory():
+    """A regime/gap stop must not leave the last maker fill exposed forever.
+
+    Unlike DE_RISK, STOP_QUOTING deliberately ignores the structural tilt: it
+    cancels quotes and asks OPMS for a bounded reduce-only flatten to zero.
+    """
+    config = PerpPairConfig(
+        coin="BTC", gamma=1.0, kappa=0.5, target_inventory=4.0,
+        caps=Caps(max_position=10.0, critical_position=20.0),
+    )
+    client = FakeOpmsClient(snapshots(), position=-2.0)
+    keeper = make_keeper(client, config)
+    await client.start()
+    keeper._inventory.position = -2.0
+
+    intent = keeper._actuate(
+        Decision.STOP_QUOTING, "immediate", time.time(), 50_000.0, None
+    )
+
+    assert intent.quote is None
+    assert intent.current_inventory == pytest.approx(-2.0)
+    assert intent.target_inventory == 0.0
+    assert intent.urgency == "immediate"
+    assert intent.strategy_hint == "passive_aggressive"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target", "position", "expected_bid", "expected_ask"),
+    [
+        # A buy moving a long structural leg toward q*=0.4 lands at q*, not beyond it.
+        (0.4, 0.35, 0.05, 0.10),
+        # The symmetric short case caps the sell that moves toward q*=-4.
+        (-4.0, -3.95, 1.0, 0.05),
+        # An inventory-reducing ask cannot flip a long structural leg short.
+        (0.4, 0.0769, 0.10, 0.0769),
+        # Nor can an inventory-reducing bid flip a short structural leg long.
+        (-4.0, -0.25, 0.25, 1.0),
+        # If a long structural leg is already short, only quote back toward flat.
+        (0.4, -0.05, 0.05, 0.0),
+        # Symmetric protection for a short structural leg that is currently long.
+        (-4.0, 0.25, 0.0, 0.25),
+    ],
+)
+async def test_keeper_quote_sizes_cannot_cross_structural_boundaries(
+    target, position, expected_bid, expected_ask
+):
+    config = PerpPairConfig(
+        coin="BTC", gamma=1.0, kappa=0.5, target_inventory=target,
+        caps=Caps(max_position=1.0 if abs(target) < 1 else 10.0, critical_position=20.0),
+    )
+    client = FakeOpmsClient(snapshots(drift=1.0), position=position)
+    keeper = make_keeper(client, config)
+    await client.start()
+    keeper._inventory.position = position
+
+    intent = keeper._actuate(Decision.QUOTE, "passive", time.time(), 50_000.0, None)
+
+    assert intent.target_inventory == pytest.approx(target)
+    assert intent.quote.bid_size == pytest.approx(expected_bid)
+    assert intent.quote.ask_size == pytest.approx(expected_ask)
 
 
 @pytest.mark.asyncio

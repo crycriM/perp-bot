@@ -16,26 +16,31 @@ def _make_basket(
     sol_target: float = 0.0,
     account_a: str = "basket_a",
     account_b: str = "basket_b",
+    leverage: int = 3,
 ) -> list[PerpPairConfig]:
     return [
         PerpPairConfig(
             coin="ETH", exchange="hyperliquid", account_id=account_a,
             target_inventory=eth_target,
+            leverage=leverage,
             caps=Caps(max_position=1.0, critical_position=2.0),
         ),
         PerpPairConfig(
             coin="SOL", exchange="hyperliquid", account_id=account_a,
             target_inventory=sol_target,
+            leverage=leverage,
             caps=Caps(max_position=10.0, critical_position=20.0),
         ),
         PerpPairConfig(
             coin="ETH", exchange="hyperliquid", account_id=account_b,
             target_inventory=-eth_target,
+            leverage=leverage,
             caps=Caps(max_position=1.0, critical_position=2.0),
         ),
         PerpPairConfig(
             coin="SOL", exchange="hyperliquid", account_id=account_b,
             target_inventory=-sol_target,
+            leverage=leverage,
             caps=Caps(max_position=10.0, critical_position=20.0),
         ),
     ]
@@ -229,9 +234,8 @@ async def test_portfolio_net_drift_logged_as_warning():
 
 @pytest.mark.asyncio
 async def test_capacity_guard_skips_correction_the_account_cannot_carry():
-    """Live 2026-09-15: flat 300 USDC shadow accounts vs a +0.4 ETH / -4 SOL
-    tilt need ~$570+ notional to establish — above the plan §1.4 budget
-    (~2.5x equity). The job must log the skip, not propose the trade."""
+    """A flat 300 USDC account at the reference 3x leverage cannot carry the
+    configured target within the buffered initial-margin budget."""
     configs = _make_basket(eth_target=0.4, sol_target=-4.0)
     positions = {
         ("basket_a", "ETH"): (0.0, 300.0), ("basket_a", "SOL"): (0.0, 300.0),
@@ -273,3 +277,54 @@ async def test_capacity_guard_allows_plan_sized_account():
     assert len(a_sent) == 2
     a_records = [r for r in records if r.account_id == "basket_a"]
     assert {r.trigger for r in a_records} == {"subaccount_imbalance"}
+
+
+@pytest.mark.asyncio
+async def test_capacity_guard_adapts_to_six_x_basket_leverage():
+    """The current ~$1350 target gross fits a 300 USDC account at 6x: about
+    $225 initial margin versus the default $250 buffered allowance."""
+    configs = _make_basket(eth_target=0.4, sol_target=-4.0, leverage=6)
+    positions = {
+        ("basket_a", "ETH"): (0.0, 300.0), ("basket_a", "SOL"): (0.0, 300.0),
+        ("basket_b", "ETH"): (0.0, 300.0), ("basket_b", "SOL"): (0.0, 300.0),
+    }
+    sent, sender = _intent_sink()
+    rebalancer = BasketRebalancer(
+        configs=configs,
+        position_provider=_position_provider(positions),
+        price_provider=_price_provider({"ETH": 2402.65, "SOL": 97.2755}),
+        intent_sender=sender,
+    )
+    records = await rebalancer.rebalance_cycle()
+    assert len(sent) == 4
+    assert records
+    assert {r.trigger for r in records} == {"subaccount_imbalance"}
+
+
+@pytest.mark.asyncio
+async def test_capacity_guard_allows_de_risking_an_overshot_book():
+    """Review 2026-09-16 #1: a correction that *reduces* gross must never be
+    blocked by the capacity guard. An account long 10 ETH vs a +4 target is
+    overshot by 6; selling down to target drops gross from $30k to $12k, well
+    inside a $15k (2.5x $6k) budget — but `gross + |drift|` double-counts the
+    exposure being removed and skips exactly the de-risk the trigger exists to
+    make."""
+    configs = _make_basket(eth_target=4.0, sol_target=0.0)
+    positions = {
+        ("basket_a", "ETH"): (10.0, 6000.0), ("basket_a", "SOL"): (0.0, 6000.0),
+        ("basket_b", "ETH"): (-4.0, 6000.0), ("basket_b", "SOL"): (0.0, 6000.0),
+    }
+    sent, sender = _intent_sink()
+    rebalancer = BasketRebalancer(
+        configs=configs,
+        position_provider=_position_provider(positions),
+        price_provider=_price_provider({"ETH": 3000.0, "SOL": 150.0}),
+        intent_sender=sender,
+    )
+    records = await rebalancer.rebalance_cycle()
+    a_records = [r for r in records if r.account_id == "basket_a"]
+    assert {r.trigger for r in a_records} == {"subaccount_imbalance"}
+    eth = [r for r in a_records if r.coin == "ETH"][0]
+    assert eth.hedge_side == "sell"
+    assert eth.hedge_size == pytest.approx(6.0)
+    assert len([i for i in sent if i.account_id == "basket_a"]) == 1
