@@ -20,14 +20,15 @@ mm-core (brain: AS, regime, risk, PnL, markout)
      ▲
 perp-bot (keeper + backtester) ──ExecIntent──▶  OPMS (body)  ──▶  venue adapter
                                                  │
-                                                 ├── dex_executor     (current prod: FastAPI, REST + WS)
-                                                 └── hb-enhanced-opms (Hummingbot-based, in-process controllers)
+                                                 ├── dex_executor     (legacy: standalone FastAPI service — REST + WS)
+                                                 └── hb-enhanced-opms (migration: HB-backed Python package — in-process)
 ```
 
 The keeper loop, one `PerpPairConfig` at a time:
 
-1. subscribes to OPMS normalized **market-data** and **fills** websockets (fills
-   stream is subaccount-scoped)
+1. ingests normalized **market-data** and **fills** — OPMS websockets on the
+   service path, in-process pushes from `PerpMMController` on the HB path
+   (fills are subaccount-scoped)
 2. reconciles inventory against authoritative OPMS position snapshots every
    tick — the keeper itself holds no durable state; OPMS (and the exchange)
    is the truth
@@ -36,13 +37,31 @@ The keeper loop, one `PerpPairConfig` at a time:
 5. emits `ExecIntent`s (quote specs via `QuoteSpec`, target-inventory
    corrections, emergency flattens) — OPMS owns how they execute
 
-The execution body is deliberately swappable: `dex_executor` is the current
-production OPMS, and `hb-enhanced-opms` is its Hummingbot-based companion —
-controllers and active-cancel / passive-aggressive executors running
-in-process. Both speak the same intent, fill, and position wire contract, so
-perp-bot is agnostic about which one executes a pair. For the live keeper
-loop today, point at `dex_executor`; the Hummingbot path is the migration
-target.
+The execution body is deliberately swappable, with two implementations of
+the same role:
+
+- **Legacy — `dex_executor`, service + API (status quo).** A standalone
+  FastAPI service (port 8000) that owns the venue adapters and a REST/WS
+  surface (`/api/v1/intents`, `/ws/md/...`, `/ws/fills/...`). The keeper
+  talks to it over HTTP/WS through `perp_bot.opms_client.OpmsClient`. This
+  is what the live keeper loop is pointed at today, and the only path wired
+  end-to-end so far.
+- **Migration target — `hb-enhanced-opms`, HB-backed Python package.** Not a
+  service: a regular Python package (conda env, since Hummingbot is not on
+  PyPI) whose `PerpMMController` hosts an *unmodified* `Keeper` in-process
+  each Hummingbot control cycle. `InProcessClient`
+  (`opms.controllers.generic.perp_mm_bridge`) duck-types `OpmsClient`'s
+  callback/query surface and is fed directly from Hummingbot's candles and
+  positions; the controller translates the keeper's `ExecIntent`s into
+  Hummingbot executor actions (active-cancel / passive-aggressive). No REST
+  hop, no service process.
+
+Both execute the same `Keeper` and share the intent/fill/position contract,
+so perp-bot is agnostic about which one handles a pair. Decision-log parity
+(`replay_decision_log.py` + `diff_decision_logs.py`) is the gate that keeps
+the two paths byte-identical: an `InProcessClient`-driven keeper must produce
+the same decision records as a bare keeper given the same inputs. Until the
+HB path is wired end-to-end, live runs use `dex_executor`.
 
 ## The strategy, in brief
 
@@ -120,9 +139,12 @@ sequence: backtest → shadow → testnet live → micro mainnet.
 src/perp_bot/
   backtest.py            # event-replay backtester, strategies, rollout gates
   config.py              # PerpPairConfig
-  keeper.py              # live keeper loop, shadow mode, decision log
+  keeper.py              # live keeper loop, shadow mode, decision log;
+                         # also hosted unmodified by hb-enhanced-opms' PerpMMController
   margin_health.py       # fail-closed margin_available handling
-  opms_client.py         # OPMS REST + WS client (reconnect, resnapshot)
+  opms_client.py         # OpmsClient: REST + WS client for the legacy service OPMS
+                         # (reconnect, resnapshot); duck-typed by hb-enhanced-opms'
+                         # InProcessClient on the in-process path
   rebalancer.py          # portfolio netting / rebalancing controller
   rebalancer_feeds.py    # OPMS-backed position/price/intent providers
   topology.py            # netted/hedged deployment validation
@@ -141,7 +163,8 @@ tests/
 
 - Python ≥ 3.11
 - `mm-core` (sibling project — installed editable)
-- `aiohttp` ≥ 3.9 (OPMS client)
+- `aiohttp` ≥ 3.9 (client for the legacy service OPMS only — not needed on
+  the HB-backed in-process path)
 - dev: `pytest`, `pytest-asyncio`
 - the historical fetch script uses `requests` directly (no HL SDK required)
 
@@ -158,13 +181,21 @@ pip install -e .
 
 ## Quick start
 
-**0 — OPMS running.** The bot needs a running `dex_executor` instance with the
-target account configured in the execution service environment, with testnet
-mode enabled before starting the service:
+**0 — OPMS running.** The keeper needs an OPMS behind it; pick one path:
 
-```bash
-uvicorn opms.service.app:app --host localhost --port 8000 --app-dir src
-```
+- *Legacy service (status quo):* run `dex_executor` with the target account
+  configured in the execution service environment, with testnet mode enabled
+  before starting the service:
+
+  ```bash
+  uvicorn opms.service.app:app --host localhost --port 8000 --app-dir src
+  ```
+
+- *HB-backed package (migration):* no service and no HTTP. Install
+  `hb-enhanced-opms` into the Hummingbot conda env and run
+  `PerpMMController` as the strategy script — it steps an unmodified `Keeper`
+  through `InProcessClient` each control cycle. Until that path is wired
+  end-to-end, keep using `dex_executor` for live runs.
 
 **1 — Backtest first** (calibrate `γ`/`κ` and check the rollout gates):
 
@@ -217,6 +248,12 @@ async def main():
 asyncio.run(main())
 ```
 
+The same `Keeper` runs unmodified on the HB-backed path — `PerpMMController`
+constructs it with an `InProcessClient` instead of an `OpmsClient`, so there
+is no `base_url`/`ws_base_url`, no REST, and no `aiohttp`. The controller
+steps the keeper each Hummingbot control cycle and translates its intents
+into Hummingbot executor actions.
+
 Notes:
 
 - **One keeper per `(exchange, coin, account_id)` on netted venues.** If you
@@ -224,7 +261,8 @@ Notes:
   `validate_account_topology(configs)` first.
 - `tick_s` ≥ 1.0; each tick does a REST position read (+ one intent POST while
   quoting) on top of OPMS's own ~1s venue polling, so start slower (e.g. 5s)
-  on a real venue.
+  on a real venue. (REST/WS only on the legacy service path — in-process
+  pushes on the HB path.)
 - `keeper.start()` runs until stopped — there is no built-in session limit.
 - `decision_log_path` is the persisted trail (flat JSONL, caller-owned; rotate
   yourself) and the shadow-mode artifact.

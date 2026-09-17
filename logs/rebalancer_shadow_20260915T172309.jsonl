@@ -1,4 +1,0 @@
-{"ts": 1789485797.7121851, "account_id": "e2_mm1", "coin": "ETH", "pre_position": 0.0, "q_target": 0.4, "hedge_size": 0.0, "hedge_side": "none", "imbalance_pct": 1.899764542639592, "trigger": "capacity_guard_skip"}
-{"ts": 1789485797.7121851, "account_id": "e2_mm1", "coin": "SOL", "pre_position": 0.0, "q_target": -4.0, "hedge_size": 0.0, "hedge_side": "none", "imbalance_pct": 1.899764542639592, "trigger": "capacity_guard_skip"}
-{"ts": 1789485797.7121851, "account_id": "e2_mm2", "coin": "ETH", "pre_position": 0.0, "q_target": -0.4, "hedge_size": 0.0, "hedge_side": "none", "imbalance_pct": 1.8980200000000005, "trigger": "capacity_guard_skip"}
-{"ts": 1789485797.7121851, "account_id": "e2_mm2", "coin": "SOL", "pre_position": 0.0, "q_target": 4.0, "hedge_size": 0.0, "hedge_side": "none", "imbalance_pct": 1.8980200000000005, "trigger": "capacity_guard_skip"}

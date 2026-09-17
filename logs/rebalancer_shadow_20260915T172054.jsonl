@@ -1,8 +1,0 @@
-{"ts": 1789485663.370058, "account_id": "e2_mm1", "coin": "ETH", "pre_position": 0.0, "q_target": 0.4, "hedge_size": 0.4, "hedge_side": "buy", "imbalance_pct": 1.8973891947499593, "trigger": "subaccount_imbalance"}
-{"ts": 1789485663.370058, "account_id": "e2_mm1", "coin": "SOL", "pre_position": 0.0, "q_target": -4.0, "hedge_size": 4.0, "hedge_side": "sell", "imbalance_pct": 1.8973891947499593, "trigger": "subaccount_imbalance"}
-{"ts": 1789485663.370058, "account_id": "e2_mm2", "coin": "ETH", "pre_position": 0.0, "q_target": -0.4, "hedge_size": 0.4, "hedge_side": "sell", "imbalance_pct": 1.8964733333333335, "trigger": "subaccount_imbalance"}
-{"ts": 1789485663.370058, "account_id": "e2_mm2", "coin": "SOL", "pre_position": 0.0, "q_target": 4.0, "hedge_size": 4.0, "hedge_side": "buy", "imbalance_pct": 1.8964733333333335, "trigger": "subaccount_imbalance"}
-{"ts": 1789485683.9028838, "account_id": "e2_mm1", "coin": "ETH", "pre_position": 0.0, "q_target": 0.4, "hedge_size": 0.4, "hedge_side": "buy", "imbalance_pct": 1.89778953428192, "trigger": "subaccount_imbalance"}
-{"ts": 1789485683.9028838, "account_id": "e2_mm1", "coin": "SOL", "pre_position": 0.0, "q_target": -4.0, "hedge_size": 4.0, "hedge_side": "sell", "imbalance_pct": 1.89778953428192, "trigger": "subaccount_imbalance"}
-{"ts": 1789485683.9028838, "account_id": "e2_mm2", "coin": "ETH", "pre_position": 0.0, "q_target": -0.4, "hedge_size": 0.4, "hedge_side": "sell", "imbalance_pct": 1.8955266666666668, "trigger": "subaccount_imbalance"}
-{"ts": 1789485683.9028838, "account_id": "e2_mm2", "coin": "SOL", "pre_position": 0.0, "q_target": 4.0, "hedge_size": 4.0, "hedge_side": "buy", "imbalance_pct": 1.8955266666666668, "trigger": "subaccount_imbalance"}
