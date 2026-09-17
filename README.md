@@ -181,30 +181,29 @@ pip install -e .
 
 ## Quick start
 
-**0 — OPMS running.** The keeper needs an OPMS behind it; pick one path:
+The steps below follow the single path that is wired end-to-end today:
+the legacy service `dex_executor` + `OpmsClient`. Step 1 backtests
+standalone; only steps 2 and 3 need the service. See step 3 for the
+HB-backed in-process variant.
 
-- *Legacy service (status quo):* run `dex_executor` with the target account
-  configured in the execution service environment, with testnet mode enabled
-  before starting the service:
+**0 — Start the legacy OPMS service** (needed for steps 2 and 3): run
+`dex_executor` with the target account configured in the execution service
+environment, with testnet mode enabled before starting:
 
-  ```bash
-  uvicorn opms.service.app:app --host localhost --port 8000 --app-dir src
-  ```
+```bash
+uvicorn opms.service.app:app --host localhost --port 8000 --app-dir src
+```
 
-- *HB-backed package (migration):* no service and no HTTP. Install
-  `hb-enhanced-opms` into the Hummingbot conda env and run
-  `PerpMMController` as the strategy script — it steps an unmodified `Keeper`
-  through `InProcessClient` each control cycle. Until that path is wired
-  end-to-end, keep using `dex_executor` for live runs.
-
-**1 — Backtest first** (calibrate `γ`/`κ` and check the rollout gates):
+**1 — Backtest first** (runs standalone — no OPMS needed; calibrate `γ`/`κ`
+and check the rollout gates):
 
 ```bash
 python scripts/fetch_hl_data.py ETH --days 30 --interval 15m
 python scripts/run_backtest.py ETH --gamma 1.0 --kappa 0.5 --max-position 0.05
 ```
 
-**2 — Shadow run** (live OPMS data, intents computed and logged, never sent):
+**2 — Shadow run** (needs the step-0 service; live OPMS data, intents
+computed and logged, never sent):
 
 ```bash
 python scripts/run_shadow.py ETH --exchange hyperliquid --account-id test \
@@ -248,11 +247,13 @@ async def main():
 asyncio.run(main())
 ```
 
-The same `Keeper` runs unmodified on the HB-backed path — `PerpMMController`
-constructs it with an `InProcessClient` instead of an `OpmsClient`, so there
-is no `base_url`/`ws_base_url`, no REST, and no `aiohttp`. The controller
-steps the keeper each Hummingbot control cycle and translates its intents
-into Hummingbot executor actions.
+**HB-backed variant (migration).** The same `Keeper` runs unmodified on
+the `hb-enhanced-opms` path: `PerpMMController` constructs it with an
+`InProcessClient` instead of `OpmsClient` — no `base_url`/`ws_base_url`, no
+REST, no `aiohttp`. The controller steps the keeper each Hummingbot control
+cycle and translates its intents into Hummingbot executor actions. Wiring
+that controller into a strategy script (conda env, deploy helpers) is
+covered in `hb-enhanced-opms/README.md`.
 
 Notes:
 
