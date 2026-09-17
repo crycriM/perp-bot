@@ -1,5 +1,5 @@
 """
-C4.3 manual live-testnet gate (see clmm-animation/docs/common-mm-remaining-tasks-BCDE.md).
+C4.3 manual live-testnet gate.
 
 Runs the real perp_bot.keeper.Keeper against a locally-spawned dex_executor
 (OPMS) instance talking to Hyperliquid testnet, end to end:
@@ -35,10 +35,10 @@ from perp_bot.opms_client import OpmsClient
 
 DEX_EXECUTOR_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "dex_executor")
 VENV_PYTHON = os.path.join(os.path.dirname(__file__), "..", "..", ".venv-legacy", "bin", "python3")
-BASE = "http://127.0.0.1:8000"
-WS_BASE = "ws://127.0.0.1:8000"
+BASE = "http://localhost:8000"
+WS_BASE = "ws://localhost:8000"
 EXCHANGE = "hyperliquid"
-ACCOUNT_ID = "e2test_main"
+ACCOUNT_ID = os.environ.get("PERP_BOT_TESTNET_ACCOUNT_ID", "testnet_gate")
 COIN = "ETH"
 
 # Small caps: this places real orders on HL testnet.
@@ -151,7 +151,7 @@ async def test_reconnect_resnapshot(client: OpmsClient, server_proc: dict) -> No
 
 def spawn_server() -> subprocess.Popen:
     return subprocess.Popen(
-        [VENV_PYTHON, "-m", "uvicorn", "opms.service.app:app", "--host", "0.0.0.0", "--port", "8000"],
+        [VENV_PYTHON, "-m", "uvicorn", "opms.service.app:app", "--host", "localhost", "--port", "8000"],
         cwd=DEX_EXECUTOR_DIR,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -179,7 +179,7 @@ async def main():
 
         client = OpmsClient(
             base_url=BASE, ws_base_url=WS_BASE, exchange=EXCHANGE, coin=COIN,
-            api_key="c43-gate", pair_config=pair_config, account_id=ACCOUNT_ID,
+            pair_config=pair_config, account_id=ACCOUNT_ID,
         )
         keeper = Keeper(client, pair_config, tick_s=5.0,
                          decision_log_path="/tmp/c43_decision_log.jsonl")

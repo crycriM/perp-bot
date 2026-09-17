@@ -20,8 +20,8 @@ from perp_bot.topology import validate_account_topology
 async def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("coin")
-    ap.add_argument("--base-url", default="http://127.0.0.1:8000")
-    ap.add_argument("--ws-base-url", default="ws://127.0.0.1:8000")
+    ap.add_argument("--base-url", default="http://localhost:8000")
+    ap.add_argument("--ws-base-url", default="ws://localhost:8000")
     ap.add_argument("--exchange", default="hyperliquid")
     ap.add_argument("--account-id", default="test")
     ap.add_argument("--gamma", type=float, default=0.25)
@@ -53,7 +53,6 @@ async def main():
         ws_base_url=args.ws_base_url,
         exchange=config.exchange,
         coin=config.coin,
-        api_key="",
         pair_config=config,
         account_id=config.account_id,
     )

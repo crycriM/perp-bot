@@ -1,4 +1,4 @@
-"""Live Hyperliquid feeds for `BasketRebalancer` (deployment plan §7 gap).
+"""Live Hyperliquid feeds for `BasketRebalancer`.
 
 The providers only touch the injected info object's methods, so these tests
 run with a dict-backed stub — no SDK, no network.

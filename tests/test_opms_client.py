@@ -13,7 +13,6 @@ def make_client():
         ws_base_url="ws://localhost:8080",
         exchange="hyperliquid",
         coin="BTC",
-        api_key="test_key",
         pair_config=MagicMock(),
         account_id="default",
     )

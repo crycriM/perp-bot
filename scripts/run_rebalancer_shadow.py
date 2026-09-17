@@ -1,7 +1,7 @@
 """Shadow the basket rebalancer against real Hyperliquid positions and prices.
 
-Closes the deployment plan §7 gap ("still needs live integration testing with
-real position/price feeds"): builds the four basket instances
+Builds the four basket instances and exercises live position and price
+feeds:
 (`basket_config.py`), feeds the rebalancer live account positions and mids,
 and runs `BasketRebalancer.rebalance_cycle()` in **shadow** mode — metrics are
 computed and every decision is logged, nothing signs.
@@ -10,7 +10,7 @@ Read-only. `--execute` additionally submits ExecIntents to a running native
 OPMS and requires `OPMS_REBALANCE_EXECUTE=confirm` in the environment.
 
 Usage (shadow, live reads):
-  python scripts/run_rebalancer_shadow.py --cycles 3
+  python scripts/run_rebalancer_shadow.py --account-a <account_a> --account-b <account_b> --cycles 3
 """
 
 from __future__ import annotations
@@ -47,10 +47,10 @@ def _account_address(account_id: str) -> str:
 def build_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cycles", type=int, default=1, help="rebalance cycles to run (0 = forever)")
-    ap.add_argument("--interval-s", type=float, default=600.0, help="cycle interval (plan: 10 min)")
-    ap.add_argument("--account-a", default="e2_mm1", help="live account mapped to basket_a")
-    ap.add_argument("--account-b", default="e2_mm2", help="live account mapped to basket_b")
-    ap.add_argument("--base-url", default="http://127.0.0.1:8000", help="native OPMS (only with --execute)")
+    ap.add_argument("--interval-s", type=float, default=600.0, help="cycle interval (10 min)")
+    ap.add_argument("--account-a", required=True, help="live account mapped to basket_a")
+    ap.add_argument("--account-b", required=True, help="live account mapped to basket_b")
+    ap.add_argument("--base-url", default="http://localhost:8000", help="native OPMS (only with --execute)")
     ap.add_argument("--decision-log", default=None, help="JSONL path (default logs/rebalancer_shadow_<ts>.jsonl)")
     ap.add_argument("--execute", action="store_true", help="send ExecIntents to OPMS (needs confirm env)")
     return ap.parse_args(argv)
@@ -73,7 +73,7 @@ async def run(args) -> int:
             raise SystemExit("refusing --execute: set OPMS_REBALANCE_EXECUTE=confirm")
         from perp_bot.opms_client import OpmsClient
         client = OpmsClient(base_url=args.base_url, ws_base_url=args.base_url.replace("http", "ws"),
-                            exchange="hyperliquid", coin="ETH", api_key="",
+                            exchange="hyperliquid", coin="ETH",
                             pair_config=configs[0], account_id=args.account_a)
         intent_sender = client.send_intent
         shadow = False

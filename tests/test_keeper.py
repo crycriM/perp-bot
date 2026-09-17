@@ -356,7 +356,7 @@ async def test_keeper_on_error_survives_resnapshot_failure():
 
     async def failing_resnapshot():
         client.resnapshot_calls += 1
-        raise RuntimeError("Cannot connect to host 127.0.0.1:8000")
+        raise RuntimeError("Cannot connect to the local OPMS service")
 
     client.resnapshot_positions = failing_resnapshot
     keeper = make_keeper(client)

@@ -37,14 +37,14 @@ class OpmsClient:
     """
 
     def __init__(self, base_url: str, ws_base_url: str, exchange: str, coin: str,
-                 api_key: str, pair_config, account_id: str = "default"):
+                 pair_config, account_id: str = "default"):
         self.base_url = base_url
         self.ws_base_url = ws_base_url
         self.exchange = exchange
         self.coin = coin
         self.symbol = f"{coin}-USD"
         self.account_id = account_id
-        self.api_key = api_key
+
         self.pair_config = pair_config
         self._session: aiohttp.ClientSession | None = None
         self._md_task: asyncio.Task | None = None
@@ -56,9 +56,7 @@ class OpmsClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                headers={"Authorization": f"Bearer {self.api_key}"}
-            )
+            self._session = aiohttp.ClientSession()
         return self._session
 
     async def send_intent(self, intent) -> dict:

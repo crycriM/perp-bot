@@ -1,7 +1,7 @@
 """Live Hyperliquid feeds for `BasketRebalancer`.
 
-Deployment plan §7 gap: the rebalancer was unit-tested with injected fakes
-only. These providers bind it to real account positions and mids. They take
+These providers bind the rebalancer to real account positions and mids.
+They take
 an already-constructed HL `Info`-like object (duck-typed: `user_state`,
 `spot_user_state`, `all_mids`) so the module stays import-light and testable
 without the SDK or the network.

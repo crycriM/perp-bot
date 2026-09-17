@@ -258,7 +258,7 @@ async def test_capacity_guard_skips_correction_the_account_cannot_carry():
 
 @pytest.mark.asyncio
 async def test_capacity_guard_allows_plan_sized_account():
-    """At the plan §1.4 funding (gross ≈ 2.5x equity at 3x) the same tilt
+    """At the configured funding level, the same tilt
     correction fits, so the guard must not block it."""
     configs = _make_basket(eth_target=0.4, sol_target=-4.0)
     positions = {

@@ -3,5 +3,11 @@ __pycache__/
 .pytest_cache/
 .venv/
 *.egg-info/
+logs/
+data/
+docs/
 *.csv
 *.log
+*.jsonl
+
+project-internal/

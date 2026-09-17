@@ -1,46 +1,45 @@
-"""Fetch HL history for backtest.py (Stream C, C3).
-
-ponytail: HL's public API has no historical L2 book or tick-level trade feed
-(`l2_snapshot` is live-only, and there's no REST "recent trades" history) —
-only OHLCV candles and funding are backfillable. So `mid` comes from candle
-close and each candle's high/low touch becomes one synthetic Backtrade (half
-the bar's volume on each side, ordered by which extreme the bar reached
-first given open->close direction). This is an approximation, not real tick
-data; if backtest fidelity vs. live turns out to matter, replace it with a
-WS trade-stream logger run live for the fetch window.
-"""
+"""Fetch HL history for backtest.py. Calls HL's public REST endpoints
+directly (no hyperliquid SDK dependency)."""
 
 import argparse
 import csv
 import time
 from pathlib import Path
 
-from hyperliquid.info import Info
-from hyperliquid.utils import constants
+import requests
 
+MAINNET_API = "https://api.hyperliquid.xyz"
+TESTNET_API = "https://api.hyperliquid-testnet.xyz"
 
 INTERVAL_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000}
-# ponytail: both candles_snapshot (5000 bars/call) and funding_history (500
-# records/call, hourly -> ~20.8d) are capped; page through in fixed-size
-# windows and dedupe by timestamp instead of guessing one call covers the
-# whole range.
 MAX_BARS_PER_CALL = 5000
-FUNDING_WINDOW_MS = 400 * 3_600_000  # 400 hourly records, under the 500 cap
+FUNDING_WINDOW_MS = 400 * 3_600_000
 
 
 def fetch(coin: str, days: int, interval: str, testnet: bool):
-    url = constants.TESTNET_API_URL if testnet else constants.MAINNET_API_URL
-    info = Info(url, skip_ws=True)
+    base_url = TESTNET_API if testnet else MAINNET_API
     end = int(time.time() * 1000)
     start = end - days * 86400 * 1000
 
     bar_ms = INTERVAL_MS.get(interval, 60_000)
     window_ms = bar_ms * MAX_BARS_PER_CALL
+    
     candles_by_t = {}
     t = start
     while t < end:
         window_end = min(t + window_ms, end)
-        for c in info.candles_snapshot(coin, interval, t, window_end):
+        payload = {
+            "type": "candleSnapshot",
+            "req": {
+                "coin": coin,
+                "interval": interval,
+                "startTime": t,
+                "endTime": window_end,
+            }
+        }
+        resp = requests.post(f"{base_url}/info", json=payload)
+        resp.raise_for_status()
+        for c in resp.json():
             candles_by_t[c["t"]] = c
         t = window_end
     candles = [candles_by_t[k] for k in sorted(candles_by_t)]
@@ -49,7 +48,15 @@ def fetch(coin: str, days: int, interval: str, testnet: bool):
     t = start
     while t < end:
         window_end = min(t + FUNDING_WINDOW_MS, end)
-        for f in info.funding_history(coin, t, window_end):
+        payload = {
+            "type": "fundingHistory",
+            "coin": coin,
+            "startTime": t,
+            "endTime": window_end,
+        }
+        resp = requests.post(f"{base_url}/info", json=payload)
+        resp.raise_for_status()
+        for f in resp.json():
             funding_by_t[f["time"]] = f
         t = window_end
     funding = [funding_by_t[k] for k in sorted(funding_by_t)]

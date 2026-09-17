@@ -5,7 +5,7 @@ Calibrated parameters from 30-day backtest (15m candles, 2026-07-31 to 2026-08-3
 - ETH: gamma=4.0, kappa=0.5, max_position=1.0, target_inventory=±0.4 (40% tilt)
 - SOL: gamma=3.0, kappa=0.7, max_position=10.0, target_inventory=±4.0 (40% tilt)
 
-Subaccount structure (per deployment plan §1.2):
+Subaccount structure:
 - basket_a: ETH tilt long (+0.4), SOL tilt short (-4.0)
 - basket_b: ETH tilt short (-0.4), SOL tilt long (+4.0)
 

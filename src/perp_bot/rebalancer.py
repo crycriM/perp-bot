@@ -1,9 +1,9 @@
 """
 Portfolio-level netting / rebalancing controller (v1 — standalone periodic job).
 
-Per hl-market-neutral-mm-deployment-plan.md §1.5: a slower control loop layered
-on top of each keeper's own RiskPolicy, correcting drift in per-subaccount
-imbalance and portfolio-level per-coin net exposure.
+A slower control loop layered on top of each keeper's own RiskPolicy,
+correcting drift in per-subaccount imbalance and portfolio-level per-coin net
+exposure.
 
 This module is pure logic + thin async IO wrappers — position/price providers
 and the intent sender are injected callables so the core is fully testable
@@ -36,7 +36,7 @@ class RebalanceConfig:
     portfolio_net_threshold: float = 0.05
     cycle_interval_s: float = 600.0
     passive_aggressive: bool = True
-    # Plan §1.4 sizing: at the reference leverage, gross notional is capped
+    # Sizing keeps gross notional within the configured equity budget.
     # at 2.5x equity with buffers. The guard below converts that allowance to
     # initial margin using each pair's configured leverage, so a correction
     # can use higher leverage when the account has less collateral.

@@ -128,7 +128,7 @@ src/perp_bot/
   topology.py            # netted/hedged deployment validation
   venue_capabilities.py  # per-venue position mode, hedge support
 scripts/
-  fetch_hl_data_v2.py    # pull HL candles/trades/funding into CSVs (direct REST)
+  fetch_hl_data.py       # pull HL candles/trades/funding into CSVs (direct REST)
   run_backtest.py        # backtest off the fetched CSVs, print the gate report
   run_shadow.py          # bounded shadow run of the live keeper
   run_rebalancer_shadow.py
@@ -159,20 +159,17 @@ pip install -e .
 ## Quick start
 
 **0 — OPMS running.** The bot needs a running `dex_executor` instance with the
-target account configured via `{EXCHANGE}_{ACCOUNT_ID}_{CREDENTIAL_TYPE}` env
-vars (see `dex_executor/README.md`), e.g.
+target account configured in the execution service environment, with testnet
+mode enabled before starting the service:
 
 ```bash
-HYPERLIQUID_TEST_PRIVATE_KEY=0x...
-HYPERLIQUID_TEST_ACCOUNT_ADDRESS=0x...
-HYPERLIQUID_TEST_IS_TESTNET=true
-uvicorn opms.service.app:app --host 127.0.0.1 --port 8000 --app-dir src
+uvicorn opms.service.app:app --host localhost --port 8000 --app-dir src
 ```
 
 **1 — Backtest first** (calibrate `γ`/`κ` and check the rollout gates):
 
 ```bash
-python scripts/fetch_hl_data_v2.py ETH --days 30 --interval 15m
+python scripts/fetch_hl_data.py ETH --days 30 --interval 15m
 python scripts/run_backtest.py ETH --gamma 1.0 --kappa 0.5 --max-position 0.05
 ```
 
@@ -205,9 +202,9 @@ validate_account_topology([config])
 
 async def main():
     client = OpmsClient(
-        base_url="http://127.0.0.1:8000", ws_base_url="ws://127.0.0.1:8000",
+        base_url="http://localhost:8000", ws_base_url="ws://localhost:8000",
         exchange=config.exchange, coin=config.coin,
-        api_key="", pair_config=config, account_id=config.account_id,
+        pair_config=config, account_id=config.account_id,
     )
     keeper = Keeper(client, config, tick_s=5.0, decision_log_path="decisions.jsonl")
     try:
@@ -246,18 +243,3 @@ Covers keeper behavior and emitted intents, inventory reconciliation against
 OPMS truth, funding and PnL accounting, OPMS client REST/WS behavior,
 margin-health fail-closed paths, topology validation, the rebalancer, and
 backtest fills/metrics/gates.
-
-## References
-
-Sibling repos in the project group. Visibility matters for a public reader:
-
-- `clmm-animation/` — **private**. Strategy and architecture docs: the perp
-  MM strategy (venues, edges, the AS/Guéant model, risk management,
-  backtester design, rollout gates, recommended path) and the keeper/OPMS
-  intent seam. The source of truth for *why* the model is shaped the way it is.
-- `mm-core/` — **private**. The shared library this repo imports: AS, regime,
-  risk, PnL, markout, contracts.
-- `dex_executor/` — **public**. The current production OPMS execution body:
-  FastAPI service, venue adapters, positions, fills, REST + WS.
-- `hb-enhanced-opms/` — **private**. The Hummingbot-based OPMS execution body
-  and the migration target for the live execution path.

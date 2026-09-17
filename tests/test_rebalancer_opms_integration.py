@@ -1,7 +1,6 @@
-"""End-to-end integration test: BasketRebalancer (execute mode) → native OPMS.
+"""End-to-end integration test for BasketRebalancer execute mode.
 
-Closes the deployment-plan §7 gap "the rebalancer's OPMS intent path
-(execution) is still untested": a drifted basket position drives a real
+A drifted basket position drives a real
 `ExecIntent` through `perp_bot.OpmsClient.send_intent` over real HTTP into
 the native OPMS (`opms.service.app`, uvicorn in-process) with the mock
 adapter, and the intent router must land a correctly sized, running
@@ -47,14 +46,14 @@ async def opms_url():
     from opms.service.app import app
 
     with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
+        s.bind(("localhost", 0))
         port = s.getsockname()[1]
 
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(app, host="localhost", port=port, log_level="warning"))
     server.install_signal_handlers = lambda: None  # pytest owns the loop's signals
     task = asyncio.create_task(server.serve())
 
-    base = f"http://127.0.0.1:{port}"
+    base = f"http://localhost:{port}"
     async with aiohttp.ClientSession() as session:
         for _ in range(100):  # 10 s worst case
             try:
@@ -95,7 +94,7 @@ async def test_rebalance_correction_flows_to_opms(opms_url):
 
     async def position_provider(account_id: str, coin: str) -> tuple[float, float]:
         # ETH flat vs target +0.4 (drift), SOL on target; equity $2000 so the
-        # §1.4 capacity guard (2.5x equity) passes for the $1200 correction.
+        # Capacity guard passes for the correction.
         return (0.0, 2000.0) if coin == "ETH" else (-4.0, 2000.0)
 
     async def price_provider(coin: str) -> float:
@@ -103,7 +102,7 @@ async def test_rebalance_correction_flows_to_opms(opms_url):
 
     client = OpmsClient(
         base_url=opms_url, ws_base_url=opms_url.replace("http", "ws"),
-        exchange="mock", coin="ETH", api_key="",
+        exchange="mock", coin="ETH",
         pair_config=configs[0], account_id="mm-a",
     )
     sent: list[dict] = []
@@ -170,7 +169,7 @@ async def test_rebalance_intent_is_idempotent_on_client_id(opms_url):
 
     client = OpmsClient(
         base_url=opms_url, ws_base_url=opms_url.replace("http", "ws"),
-        exchange="mock", coin="ETH", api_key="",
+        exchange="mock", coin="ETH",
         pair_config=configs[0], account_id="mm-a",
     )
     captured: list = []
