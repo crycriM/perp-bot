@@ -8,9 +8,9 @@ exchange credentials.
 
 The strategy it implements is a bidirectional Avellaneda-Stoikov market-making
 design for perp orderbooks. All shared math and policy (AS quotes, regime,
-risk, PnL, markout) lives in the `mm-core` library, and the detailed strategy
-and architecture documentation lives in sibling repos — see
-[References](#references) for what is public and what is not. This repo is
+risk, PnL, markout) lives in the `mm-core` library, and the strategy and
+architecture detail lives in sibling repos — see [References](#references).
+This repo is
 the perp keeper loop and the event-replay backtester built on `mm-core`.
 
 ## Role in the system
@@ -103,8 +103,11 @@ as zero available margin and triggers `EMERGENCY_EXIT` rather than disabling
 the stop), markout tracking for toxic flow, and — for multi-account
 deployments — the basket rebalancer below.
 
-The backtester enforces these rollout gates before a pair goes live: **net edge > 2.0 bps,
-markout ratio < 0.5, max drawdown < 5%, zero liquidations**. Rollout
+The backtester enforces the backtest-side rollout gates before a pair goes
+live: **net edge > 2.0 bps, markout ratio < 0.5, max drawdown < 5%**. The
+**zero-liquidations** gate needs a margin/leverage model — the current
+backtester has none, so it reports this as trivially met today; the gate is
+enforced on the live/OPMS path. Rollout
 sequence: backtest → shadow → testnet live → micro mainnet.
 
 ## Features
@@ -183,7 +186,7 @@ pip install -e .
 
 The steps below follow the single path that is wired end-to-end today:
 the legacy service `dex_executor` + `OpmsClient`. Step 1 backtests
-standalone; only steps 2 and 3 need the service. See step 3 for the
+standalone; steps 2, 3, and 4 need the service. See step 3 for the
 HB-backed in-process variant.
 
 **0 — Start the legacy OPMS service** (needed for steps 2 and 3): run
@@ -255,6 +258,12 @@ cycle and translates its intents into Hummingbot executor actions. Wiring
 that controller into a strategy script (conda env, deploy helpers) is
 covered in `hb-enhanced-opms/README.md`.
 
+**4 — Micro mainnet.** Same keeper as step 3, pointed at the mainnet OPMS and
+the mainnet account — but gated behind the backtest, shadow, and testnet-live
+gates above plus the micro-capital approval, and not yet the default path.
+Only the OPMS `base_url`, the `account_id`, and the account credentials
+differ (credentials live in the OPMS service's `.env`, never in this repo).
+
 Notes:
 
 - **One keeper per `(exchange, coin, account_id)` on netted venues.** If you
@@ -282,3 +291,12 @@ Covers keeper behavior and emitted intents, inventory reconciliation against
 OPMS truth, funding and PnL accounting, OPMS client REST/WS behavior,
 margin-health fail-closed paths, topology validation, the rebalancer, and
 backtest fills/metrics/gates.
+
+## References
+
+- **`mm-core`** — shared math + policy (Avellaneda-Stoikov quotes, regime, risk, PnL, markout, contracts). This repo is built on it.
+- **`clmm-animation`** — doc-only architecture source of truth (`perp-mm-strategy.md` plus the shared-architecture and plan docs). Read for the strategy *why*.
+- **`dex_executor`** — OPMS v1, the standalone execution service the keeper talks to today (REST + WS).
+- **`hb-enhanced-opms`** — OPMS v2, the Hummingbot-based migration target that hosts the `Keeper` in-process.
+
+The rollout gates above and the full strategy detail originate from `perp-mm-strategy.md`; that file currently lives under `project-internal/` (internal), so the gates are restated here and in `backtest.py` for readers who do not have it.

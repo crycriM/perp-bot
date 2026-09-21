@@ -14,7 +14,7 @@ from mm_core.vol import VOLATILITY_MODELS
 
 logger = logging.getLogger(__name__)
 
-# perp-mm-strategy §8.3 rollout gates
+# rollout gates (restated in the README "The strategy, in brief")
 GATE_MIN_NET_EDGE_BPS = 2.0
 GATE_MAX_MARKOUT_RATIO = 0.5
 GATE_MAX_DRAWDOWN = 0.05
@@ -225,7 +225,7 @@ class Backtest:
         return self._pnl.explain()
 
     def metrics(self) -> dict:
-        """Summary stats for the §8.3 gates.
+        """Summary stats for the rollout gates.
 
         ponytail: net edge + max DD + fill count only; markout ratio (beyond
         the ledger's own markout_pnl) and a liquidation model come with the
@@ -264,7 +264,7 @@ class Backtest:
         }
 
     def gate_report(self) -> dict:
-        """Pass/fail against perp-mm-strategy §8.3 before any live order."""
+        """Pass/fail against the rollout gates before any live order."""
         m = self.metrics()
         checks = {
             "net_edge_bps": (m["net_edge_bps"] > GATE_MIN_NET_EDGE_BPS, m["net_edge_bps"], GATE_MIN_NET_EDGE_BPS),
@@ -303,7 +303,7 @@ class Strategy:
 
 @dataclass
 class BaselineStrategy:
-    """Symmetric fixed-spread grid — the §8.3 baseline the AS strategy must
+    """Symmetric fixed-spread grid — the rollout baseline the AS strategy must
     beat. Centers on mid, ignores inventory/regime entirely."""
     spread_bps: float = 50.0
     size_frac: float = 0.1

@@ -1,4 +1,4 @@
-"""C4.1: run Backtest off fetch_hl_data.py's CSVs and print the §8.3 gate report.
+"""C4.1: run Backtest off fetch_hl_data.py's CSVs and print the rollout gate report.
 
 Usage: python run_backtest.py BTC --data-dir data --gamma 1.0 --kappa 0.5
 """

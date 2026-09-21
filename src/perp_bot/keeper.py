@@ -339,8 +339,8 @@ class Keeper:
         # An inventory-reducing maker order is sent reduce-only by the
         # execution layer. Cap it to the position it can actually close, both
         # to avoid venue rejection and to preserve the current sign. This
-        # closed the live-soak failure where +0.0769 ETH was followed by a
-        # 0.1 ETH ask fill, leaving an unintended -0.0231 ETH position.
+        # closed a live-soak failure where a Buy orde was followed by a
+        # larger ask fill, leaving an unintended short position.
         if position > 0:
             ask_size = min(ask_size, position)
         elif position < 0:
