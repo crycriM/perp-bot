@@ -76,11 +76,13 @@ def main():
     )
     asyncio.run(bt.run(duration_s=duration_s, tick_s=tick_s))
 
+    metrics = bt.metrics()
     report = bt.gate_report()
     print(
         f"DATA coin={args.coin} snapshots={len(snapshots)} trades={len(trades)} "
         f"funding={len(funding)} tick_s={tick_s} "
-        f"max_position={args.max_position} critical_position={critical_position}"
+        f"max_position={args.max_position} critical_position={critical_position} "
+        f"fills={metrics['n_fills']}"
     )
     for name, check in report["checks"].items():
         status = "PASS" if check["passed"] else "FAIL"

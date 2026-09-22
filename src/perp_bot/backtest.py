@@ -6,11 +6,14 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from mm_core.as_core import gueant_half_spread, gueant_reservation_price
 from mm_core.contracts import ExecIntent, MarketSnapshot, QuoteSpec
 from mm_core.inventory import Caps, PerpInventory
+from mm_core.markout import MarkoutTracker
 from mm_core.pnl import Fill, PnLLedger
-from mm_core.vol import VOLATILITY_MODELS
+from mm_core.regime import evaluate_regime
+from mm_core.risk_policy import RiskPolicy
+
+from perp_bot.keeper import MID_HISTORY_LEN, build_intent
 
 logger = logging.getLogger(__name__)
 
@@ -147,9 +150,12 @@ class Backtest:
         t = t0
         while t < t_end:
             # Process snapshots up to t
+            markout = getattr(self._strategy, "markout", None)
             while self._snapshots and self._snapshots[0].ts <= t:
                 snap = self._snapshots.pop(0)
                 self._mid_history.append((snap.ts, snap.mid))
+                if markout is not None:
+                    markout.on_mid(snap.ts, snap.mid)
 
             mid = self._mid_history[-1][1] if self._mid_history else 0.0
 
@@ -161,6 +167,8 @@ class Backtest:
                     side = "sell" if fill.side == "ask" else "buy"
                     self._pnl.on_fill(Fill(ts=t, side=side, price=fill.price,
                                             size=fill.size, mid_at_fill=mid))
+                    if markout is not None:
+                        markout.on_fill(t, side, fill.price, fill.size)
 
                 next_trade = next(trades_iter, None)
             self._inventory.position = self._pnl.position
@@ -192,14 +200,14 @@ class Backtest:
                     ))
                     self._resting_orders = []
                     if intent and intent.quote:
-                        self._resting_orders.append({
-                            "side": "bid", "price": intent.quote.bid_price,
-                            "size": intent.quote.bid_size,
-                        })
-                        self._resting_orders.append({
-                            "side": "ask", "price": intent.quote.ask_price,
-                            "size": intent.quote.ask_size,
-                        })
+                        for side in ("bid", "ask"):
+                            price = getattr(intent.quote, f"{side}_price")
+                            size = getattr(intent.quote, f"{side}_size")
+                            if price is not None and size > 0:
+                                self._resting_orders.append(
+                                    {"side": side, "price": price, "size": size})
+                    elif intent:
+                        self._execute_close(t, mid, intent)
 
             self._history.append({
                 "ts": t, "mid": mid, "equity": self._equity,
@@ -212,6 +220,21 @@ class Backtest:
             self._decision_log = None
 
         return self._history
+
+    def _execute_close(self, t: float, mid: float, intent: ExecIntent) -> None:
+        """Quote-less intents (stop_quoting / de_risk / emergency_exit): OPMS
+        works the position to target_inventory. Filled at once, at mid.
+
+        ponytail: instant mid fill, no taker fee/slippage — optimistic; add a
+        taker cost once OPMS close fills are measured.
+        """
+        gap = intent.target_inventory - self._inventory.position
+        if abs(gap) < 1e-12 or mid <= 0:
+            return
+        side = "buy" if gap > 0 else "sell"
+        self._pnl.on_fill(Fill(ts=t, side=side, price=mid, size=abs(gap),
+                               mid_at_fill=mid, label=intent.urgency))
+        self._inventory.position = self._pnl.position
 
     def _log_decision(self, record: BacktestDecisionRecord) -> None:
         if self._decision_log is None:
@@ -280,26 +303,31 @@ class Backtest:
 
 @dataclass
 class Strategy:
+    """The live keeper's decision path: regime -> RiskPolicy -> build_intent.
+    Same window, same policy, same actuation as perp_bot.keeper.Keeper."""
     config: Any = None
+    risk: RiskPolicy | None = None
+    markout: MarkoutTracker = field(
+        default_factory=lambda: MarkoutTracker(horizons=(10.0, 30.0, 60.0)))
+
+    def __post_init__(self):
+        if self.risk is None and self.config is not None:
+            self.risk = RiskPolicy(cfg=self.config.risk)
 
     def __call__(self, config, inventory, equity, mid_history, ts, mid):
         if not mid_history or len(mid_history) < 2:
             return None
-        sigma = VOLATILITY_MODELS["close_to_close"](mid_history)
-        r = gueant_reservation_price(
-            mid, inventory.position, config.gamma, sigma, config.kappa,
-            q_target=getattr(config, "target_inventory", 0.0),
+        history = list(mid_history[-MID_HISTORY_LEN:])
+        decision, urgency = self.risk.evaluate(
+            ts=ts, mid=mid, equity=equity, inventory=inventory,
+            regime=evaluate_regime(history),
+            avg_markout_bps=self.markout.avg_markout_bps(30.0),
+            target_inventory=config.target_inventory,
+            # ponytail: no margin model in the backtest, so margin checks are off
+            margin_available=None,
         )
-        hs = gueant_half_spread(config.gamma, sigma, config.kappa)
-        return ExecIntent(
-            venue=config.exchange, coin=config.coin,
-            target_inventory=inventory.position,
-            quote=QuoteSpec(
-                bid_price=r - hs, ask_price=r + hs,
-                bid_size=config.caps.max_position * 0.1,
-                ask_size=config.caps.max_position * 0.1,
-            ),
-        )
+        return build_intent(config, decision, urgency, mid, inventory.position,
+                            history, inventory.caps().max_position)
 
 @dataclass
 class BaselineStrategy:

@@ -21,6 +21,8 @@ from perp_bot.opms_client import OpmsClient
 
 logger = logging.getLogger(__name__)
 
+MID_HISTORY_LEN = 200  # regime/vol window; the backtest slices to the same length
+
 @dataclass
 class DecisionRecord:
     source: str
@@ -57,7 +59,7 @@ class Keeper:
         self._inventory = PerpInventory(position=0.0, _caps=config.caps)
         self._equity = 0.0
         self._margin_available: float | None = None
-        self._mid_history: deque = deque(maxlen=200)
+        self._mid_history: deque = deque(maxlen=MID_HISTORY_LEN)
         self._running = False
         self._last_funding_ts: float | None = None
         # JSON-lines decision record — the shadow-mode artifact
@@ -234,124 +236,134 @@ class Keeper:
         self._decision_log.write(json.dumps(d) + "\n")
         self._decision_log.flush()
 
-    def _actuate(self, decision: Decision, urgency: str, ts: float, mid: float, regime) -> ExecIntent:
-        coin = self.config.coin
-        gamma = self.config.gamma
-        sigma = VOLATILITY_MODELS["close_to_close"](list(self._mid_history))
-        kappa = self.config.kappa
-
-        pos = self._inventory.position
-        q_target = self.config.target_inventory
-
-        if decision == Decision.QUOTE:
-            r = gueant_reservation_price(mid, pos, gamma, sigma, kappa, q_target=q_target)
-            hs = gueant_half_spread(gamma, sigma, kappa)
-            bid_size, ask_size = self._bounded_quote_sizes(
-                pos, q_target, self._inventory.caps().max_position * 0.1
-            )
-            return ExecIntent(
-                venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
-                target_inventory=q_target,
-                current_inventory=pos,
-                quote=QuoteSpec(
-                    bid_price=r - hs if bid_size > 0 else None,
-                    ask_price=r + hs if ask_size > 0 else None,
-                    bid_size=bid_size,
-                    ask_size=ask_size,
-                ),
-                urgency=urgency,
-            )
-        elif decision == Decision.WIDEN:
-            r = gueant_reservation_price(mid, pos, gamma, sigma, kappa, q_target=q_target)
-            hs = gueant_half_spread(gamma, sigma, kappa) * self.config.widen_factor
-            bid_size, ask_size = self._bounded_quote_sizes(
-                pos, q_target, self._inventory.caps().max_position * 0.05
-            )
-            return ExecIntent(
-                venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
-                target_inventory=q_target,
-                current_inventory=pos,
-                quote=QuoteSpec(
-                    bid_price=r - hs if bid_size > 0 else None,
-                    ask_price=r + hs if ask_size > 0 else None,
-                    bid_size=bid_size,
-                    ask_size=ask_size,
-                ),
-                urgency=urgency,
-            )
-        elif decision == Decision.STOP_QUOTING:
-            # A stopped market cannot work a maker fill back out. Flatten the
-            # residual rather than holding it unquoted for an unbounded time.
-            # The execution layer maps ``immediate`` to a bounded reduce-only
-            # passive/aggressive close, so this can never add exposure toward
-            # the structural tilt or flip the position through flat.
-            return ExecIntent(
-                venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
-                target_inventory=0.0,
-                current_inventory=pos,
-                quote=None,
-                urgency=urgency,
-                strategy_hint="passive_aggressive",
-            )
-        elif decision == Decision.DE_RISK:
-            return ExecIntent(
-                venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
-                target_inventory=q_target,
-                current_inventory=pos,
-                quote=None,
-                urgency=urgency,
-                strategy_hint="passive_aggressive",
-            )
-        elif decision == Decision.EMERGENCY_EXIT:
-            return ExecIntent(
-                venue=self.config.exchange, coin=coin, account_id=self.config.account_id,
-                target_inventory=0.0,  # full flatten always overrides any structural tilt
-                current_inventory=pos,
-                quote=None,
-                urgency="emergency",
-                strategy_hint="twap",
-            )
-        return None
-
-    def _bounded_quote_sizes(
-        self, position: float, target: float, nominal_size: float
-    ) -> tuple[float, float]:
-        """Return quote sizes whose *single full fill* stays inside safety bounds.
-
-        Inventory is capped relative to the structural target.  The quote that
-        moves inventory toward that target is additionally clipped to land on
-        it, never jump across it.  For a directional structural leg, the
-        opposite quote is clipped at flat as well; the execution layer also
-        marks that side reduce-only to protect against stale overlapping
-        orders and position-cache lag.
-        """
-        cap = self._inventory.caps().max_position
-        lower = target - cap
-        upper = target + cap
-        bid_size = min(nominal_size, max(upper - position, 0.0))
-        ask_size = min(nominal_size, max(position - lower, 0.0))
-
-        if position < target:
-            bid_size = min(bid_size, target - position)
-        elif position > target:
-            ask_size = min(ask_size, position - target)
-
-        # An inventory-reducing maker order is sent reduce-only by the
-        # execution layer. Cap it to the position it can actually close, both
-        # to avoid venue rejection and to preserve the current sign. This
-        # closed a live-soak failure where a Buy orde was followed by a
-        # larger ask fill, leaving an unintended short position.
-        if position > 0:
-            ask_size = min(ask_size, position)
-        elif position < 0:
-            bid_size = min(bid_size, -position)
-        if target > 0 and position <= 0:
-            ask_size = 0.0
-        elif target < 0 and position >= 0:
-            bid_size = 0.0
-
-        epsilon = 1e-12
-        return (
-            0.0 if bid_size < epsilon else bid_size,
-            0.0 if ask_size < epsilon else ask_size,
+    def _actuate(self, decision: Decision, urgency: str, ts: float, mid: float, regime) -> ExecIntent | None:
+        return build_intent(
+            self.config, decision, urgency, mid, self._inventory.position,
+            list(self._mid_history), self._inventory.caps().max_position,
         )
+
+
+def build_intent(
+    config: PerpPairConfig, decision: Decision, urgency: str, mid: float,
+    pos: float, mid_history: list, max_position: float,
+) -> ExecIntent | None:
+    """Decision -> ExecIntent. Pure, so the live keeper and the backtest
+    actuate through the exact same code."""
+    coin = config.coin
+    gamma = config.gamma
+    sigma = VOLATILITY_MODELS["close_to_close"](mid_history)
+    kappa = config.kappa
+
+    q_target = config.target_inventory
+
+    if decision == Decision.QUOTE:
+        r = gueant_reservation_price(mid, pos, gamma, sigma, kappa, q_target=q_target)
+        hs = gueant_half_spread(gamma, sigma, kappa)
+        bid_size, ask_size = bounded_quote_sizes(
+            pos, q_target, max_position, max_position * 0.1
+        )
+        return ExecIntent(
+            venue=config.exchange, coin=coin, account_id=config.account_id,
+            target_inventory=q_target,
+            current_inventory=pos,
+            quote=QuoteSpec(
+                bid_price=r - hs if bid_size > 0 else None,
+                ask_price=r + hs if ask_size > 0 else None,
+                bid_size=bid_size,
+                ask_size=ask_size,
+            ),
+            urgency=urgency,
+        )
+    elif decision == Decision.WIDEN:
+        r = gueant_reservation_price(mid, pos, gamma, sigma, kappa, q_target=q_target)
+        hs = gueant_half_spread(gamma, sigma, kappa) * config.widen_factor
+        bid_size, ask_size = bounded_quote_sizes(
+            pos, q_target, max_position, max_position * 0.05
+        )
+        return ExecIntent(
+            venue=config.exchange, coin=coin, account_id=config.account_id,
+            target_inventory=q_target,
+            current_inventory=pos,
+            quote=QuoteSpec(
+                bid_price=r - hs if bid_size > 0 else None,
+                ask_price=r + hs if ask_size > 0 else None,
+                bid_size=bid_size,
+                ask_size=ask_size,
+            ),
+            urgency=urgency,
+        )
+    elif decision == Decision.STOP_QUOTING:
+        # A stopped market cannot work a maker fill back out. Flatten the
+        # residual rather than holding it unquoted for an unbounded time.
+        # The execution layer maps ``immediate`` to a bounded reduce-only
+        # passive/aggressive close, so this can never add exposure toward
+        # the structural tilt or flip the position through flat.
+        return ExecIntent(
+            venue=config.exchange, coin=coin, account_id=config.account_id,
+            target_inventory=0.0,
+            current_inventory=pos,
+            quote=None,
+            urgency=urgency,
+            strategy_hint="passive_aggressive",
+        )
+    elif decision == Decision.DE_RISK:
+        return ExecIntent(
+            venue=config.exchange, coin=coin, account_id=config.account_id,
+            target_inventory=q_target,
+            current_inventory=pos,
+            quote=None,
+            urgency=urgency,
+            strategy_hint="passive_aggressive",
+        )
+    elif decision == Decision.EMERGENCY_EXIT:
+        return ExecIntent(
+            venue=config.exchange, coin=coin, account_id=config.account_id,
+            target_inventory=0.0,  # full flatten always overrides any structural tilt
+            current_inventory=pos,
+            quote=None,
+            urgency="emergency",
+            strategy_hint="twap",
+        )
+    return None
+
+def bounded_quote_sizes(
+    position: float, target: float, cap: float, nominal_size: float
+) -> tuple[float, float]:
+    """Return quote sizes whose *single full fill* stays inside safety bounds.
+
+    Inventory is capped relative to the structural target.  The quote that
+    moves inventory toward that target is additionally clipped to land on
+    it, never jump across it.  For a directional structural leg, the
+    opposite quote is clipped at flat as well; the execution layer also
+    marks that side reduce-only to protect against stale overlapping
+    orders and position-cache lag.
+    """
+    lower = target - cap
+    upper = target + cap
+    bid_size = min(nominal_size, max(upper - position, 0.0))
+    ask_size = min(nominal_size, max(position - lower, 0.0))
+
+    if position < target:
+        bid_size = min(bid_size, target - position)
+    elif position > target:
+        ask_size = min(ask_size, position - target)
+
+    # An inventory-reducing maker order is sent reduce-only by the
+    # execution layer. Cap it to the position it can actually close, both
+    # to avoid venue rejection and to preserve the current sign. This
+    # closed a live-soak failure where a Buy orde was followed by a
+    # larger ask fill, leaving an unintended short position.
+    if position > 0:
+        ask_size = min(ask_size, position)
+    elif position < 0:
+        bid_size = min(bid_size, -position)
+    if target > 0 and position <= 0:
+        ask_size = 0.0
+    elif target < 0 and position >= 0:
+        bid_size = 0.0
+
+    epsilon = 1e-12
+    return (
+        0.0 if bid_size < epsilon else bid_size,
+        0.0 if ask_size < epsilon else ask_size,
+    )

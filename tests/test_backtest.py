@@ -255,3 +255,24 @@ def test_gate_report_passes_when_all_metrics_within_bounds():
     report = bt.gate_report()
     assert report["checks"]["max_drawdown"]["passed"] is True
     assert report["checks"]["liquidations"] == {"passed": True, "value": 0, "threshold": 0}
+
+
+def test_strategy_runs_live_risk_path_and_flattens_on_closed_gate():
+    """Trending mids close the regime gate -> STOP_QUOTING -> no quotes, and the
+    held position is flattened, exactly as the live keeper would do."""
+    import asyncio
+    from mm_core.pnl import Fill
+
+    config = make_config()
+    bt = Backtest(config, start_equity=10000.0)
+    bt.set_strategy(Strategy(config))
+    t0 = time.time()
+    for i in range(80):
+        bt.add_snapshot(MarketSnapshot(venue="hl", coin="BTC", ts=t0 + i, mid=50000.0 * 1.002 ** i))
+    bt._pnl.on_fill(Fill(ts=t0, side="buy", price=50000.0, size=1.0, mid_at_fill=50000.0))
+    bt.load_trades([])
+    bt.load_funding([])
+    asyncio.run(bt.run(duration_s=80.0))
+
+    assert bt._resting_orders == []
+    assert bt._pnl.position == pytest.approx(0.0)
