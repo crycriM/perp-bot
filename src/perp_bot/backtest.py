@@ -386,9 +386,11 @@ class Backtest:
             if peak > 0:
                 max_dd = max(max_dd, (peak - h["equity"]) / peak)
 
+        adverse_markout = max(-breakdown.markout_pnl, 0.0)
+        captured_spread = max(breakdown.spread_capture, 0.0)
         markout_ratio = (
-            abs(breakdown.markout_pnl) / abs(breakdown.spread_capture)
-            if breakdown.spread_capture else 0.0
+            adverse_markout / captured_spread
+            if captured_spread else (float("inf") if adverse_markout else 0.0)
         )
 
         return {
