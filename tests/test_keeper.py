@@ -8,7 +8,7 @@ from mm_core.inventory import Caps
 from mm_core.risk_policy import Decision
 
 from perp_bot.config import PerpPairConfig
-from perp_bot.keeper import Keeper
+from perp_bot.keeper import Keeper, build_intent
 from perp_bot.opms_client import Position
 
 
@@ -102,6 +102,19 @@ async def test_keeper_normal_quote():
     q = quote_intents[-1].quote
     assert q.bid_price < q.ask_price
     assert quote_intents[-1].current_inventory == 0.0
+
+
+def test_quote_builder_omits_nonpositive_prices():
+    config = PerpPairConfig(coin="ENA", gamma=1.0, kappa=0.001)
+
+    intent = build_intent(
+        config, Decision.QUOTE, "passive", 0.25, 0.0,
+        [(0.0, 0.25), (900.0, 0.25), (1800.0, 0.25)],
+        config.caps.max_position,
+    )
+
+    assert intent.quote.bid_price is None
+    assert intent.quote.ask_price > 0
 
 
 @pytest.mark.asyncio
