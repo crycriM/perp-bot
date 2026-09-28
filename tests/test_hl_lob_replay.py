@@ -101,12 +101,12 @@ def _fixed_strategy(bid, ask, size):
     return strategy
 
 
-def _queue_backtest(trades):
+def _queue_backtest(trades, **backtest_kwargs):
     config = PerpPairConfig(
         coin="ENA",
         caps=Caps(max_position=1000.0, critical_position=2000.0),
     )
-    bt = Backtest(config, start_equity=1000.0)
+    bt = Backtest(config, start_equity=1000.0, **backtest_kwargs)
     bt.set_strategy(_fixed_strategy(1.00, 1.02, 10.0))
     for ts in (0.0, 0.5, 1.0, 1.5, 2.0):
         bt.add_book(BacktestBook(ts=ts, bids=((1.00, 100.0),), asks=((1.02, 20.0),)))
@@ -135,3 +135,17 @@ def test_trade_through_quote_fills_order_despite_displayed_queue():
 
     assert bt.metrics()["n_fills"] == 1
     assert bt._fills[0].size == pytest.approx(10.0)
+
+
+def test_lob_queue_accumulates_trades_until_live_quote_refresh():
+    bt = _queue_backtest(
+        [
+            Backtrade(ts=1.1, side="buy", price=1.02, size=15.0),
+            Backtrade(ts=2.1, side="buy", price=1.02, size=10.0),
+        ],
+        decision_interval_s=1.0,
+        quote_refresh_s=10.0,
+    )
+
+    assert bt.metrics()["n_fills"] == 1
+    assert bt._fills[0].size == pytest.approx(5.0)
