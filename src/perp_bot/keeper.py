@@ -293,11 +293,12 @@ def build_intent(
     kappa = config.kappa
 
     q_target = config.target_inventory
+    normalized_inventory = (pos - q_target) / max_position
     nominal_size = config.quote_size or max_position * 0.1
 
     if decision == Decision.QUOTE:
         bid_price, ask_price = gueant_quote_prices(
-            mid, pos, gamma, sigma, kappa, q_target=q_target,
+            mid, normalized_inventory, gamma, sigma, kappa,
         )
         bid_size, ask_size = bounded_quote_sizes(
             pos, q_target, max_position, nominal_size
@@ -320,7 +321,7 @@ def build_intent(
         )
     elif decision == Decision.WIDEN:
         bid_price, ask_price = gueant_quote_prices(
-            mid, pos, gamma, sigma, kappa, q_target=q_target,
+            mid, normalized_inventory, gamma, sigma, kappa,
             spread_multiplier=config.widen_factor,
         )
         bid_size, ask_size = bounded_quote_sizes(
