@@ -36,6 +36,19 @@ class Backtrade:
     size: float
 
 
+@dataclass(frozen=True)
+class BacktestBook:
+    """One full L2 snapshot used to model queue ahead of maker quotes."""
+
+    ts: float
+    bids: tuple[tuple[float, float], ...]
+    asks: tuple[tuple[float, float], ...]
+
+    @property
+    def mid(self) -> float:
+        return (self.bids[0][0] + self.asks[0][0]) / 2.0
+
+
 @dataclass
 class BacktestDecisionRecord:
     source: str
@@ -88,6 +101,8 @@ class Backtest:
         self._trades: list[Backtrade] = []
         self._funding_events: list = []
         self._snapshots: list[MarketSnapshot] = []
+        self._books: list[BacktestBook] = []
+        self._current_book: BacktestBook | None = None
         self._fills: list[BacktestFill] = []
         self._history: list = []
         self._strategies: dict[str, Callable] = {}
@@ -115,6 +130,20 @@ class Backtest:
     def add_snapshot(self, snapshot: MarketSnapshot):
         self._snapshots.append(snapshot)
 
+    def add_book(self, book: BacktestBook):
+        self._books.append(book)
+        self.add_snapshot(MarketSnapshot(
+            venue="hyperliquid", coin=self.config.coin, ts=book.ts, mid=book.mid,
+        ))
+
+    def _visible_queue(self, side: str, price: float) -> float | None:
+        if self._current_book is None:
+            return None
+        levels = self._current_book.bids if side == "bid" else self._current_book.asks
+        tolerance = max(abs(price) * 1e-12, 1e-12)
+        return sum(size for level_price, size in levels
+                   if abs(level_price - price) <= tolerance)
+
     def _fill_rule(self, ts: float, trade: Backtrade) -> list[BacktestFill]:
         """A resting order fills when a trade prints through its price."""
         filled: list[BacktestFill] = []
@@ -123,16 +152,44 @@ class Backtest:
             if trade.size <= 0:
                 remaining.append(order)
                 continue
-            if trade.side == "buy" and order["side"] == "ask" and trade.price >= order["price"]:
+            is_ask_hit = trade.side == "buy" and order["side"] == "ask"
+            is_bid_hit = trade.side == "sell" and order["side"] == "bid"
+            tolerance = max(abs(order["price"]) * 1e-12, 1e-12)
+            through = (
+                (is_ask_hit and trade.price > order["price"] + tolerance)
+                or (is_bid_hit and trade.price < order["price"] - tolerance)
+            )
+            at_price = (
+                (is_ask_hit or is_bid_hit)
+                and abs(trade.price - order["price"]) <= tolerance
+            )
+            if through:
+                # A later print beyond our price proves our level was swept,
+                # even if the exchange reports that worse-price match in a
+                # separate trade record with a smaller size.
+                fill_size = order["size"]
+            elif at_price:
+                queue_ahead = order.get("queue_ahead")
+                if queue_ahead is not None and queue_ahead > 0:
+                    consumed = min(queue_ahead, trade.size)
+                    order["queue_ahead"] -= consumed
+                    trade.size -= consumed
+                if trade.size <= 0:
+                    remaining.append(order)
+                    continue
                 fill_size = min(trade.size, order["size"])
+            else:
+                remaining.append(order)
+                continue
+
+            if is_ask_hit:
                 filled.append(BacktestFill(side="ask", price=order["price"], size=fill_size))
                 order["size"] -= fill_size
                 trade.size -= fill_size
                 if order["size"] <= 0:
                     continue
                 remaining.append(order)
-            elif trade.side == "sell" and order["side"] == "bid" and trade.price <= order["price"]:
-                fill_size = min(trade.size, order["size"])
+            elif is_bid_hit:
                 filled.append(BacktestFill(side="bid", price=order["price"], size=fill_size))
                 order["size"] -= fill_size
                 trade.size -= fill_size
@@ -164,6 +221,8 @@ class Backtest:
         while t < t_end:
             # Process snapshots up to t
             markout = getattr(self._strategy, "markout", None)
+            while self._books and self._books[0].ts <= t:
+                self._current_book = self._books.pop(0)
             while self._snapshots and self._snapshots[0].ts <= t:
                 snap = self._snapshots.pop(0)
                 self._mid_history.append((snap.ts, snap.mid))
@@ -237,7 +296,12 @@ class Backtest:
                             size = getattr(intent.quote, f"{side}_size")
                             if price is not None and size > 0:
                                 self._resting_orders.append(
-                                    {"side": side, "price": price, "size": size})
+                                    {
+                                        "side": side,
+                                        "price": price,
+                                        "size": size,
+                                        "queue_ahead": self._visible_queue(side, price),
+                                    })
                     elif intent:
                         self._execute_close(t, mid, intent)
 
