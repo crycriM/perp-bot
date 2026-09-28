@@ -183,6 +183,22 @@ def test_pnl_explain_exposes_fill_history():
     assert b.fills[0].mid_at_fill is not None
 
 
+def test_favorable_markout_does_not_count_as_toxicity():
+    from mm_core.pnl import Fill
+
+    bt = Backtest(make_config(), start_equity=1000.0)
+    bt._pnl.on_fill(Fill(
+        ts=1.0, side="buy", price=99.0, size=1.0, mid_at_fill=100.0,
+    ))
+    bt._pnl.mark(2.0, 101.0)
+    bt._history.append({"ts": 2.0, "mid": 101.0, "equity": 1002.0, "position": 1.0})
+
+    metrics = bt.metrics()
+    assert metrics["spread_capture"] == pytest.approx(1.0)
+    assert metrics["markout_pnl"] == pytest.approx(1.0)
+    assert metrics["markout_ratio"] == 0.0
+
+
 def test_strategy_intents_use_configured_exchange_as_venue():
     """Both the AS Strategy and BaselineStrategy must tag intents with the
     real routing exchange id, not a display label — this is what OPMS uses
