@@ -141,7 +141,7 @@ def test_lob_queue_accumulates_trades_until_live_quote_refresh():
     bt = _queue_backtest(
         [
             Backtrade(ts=1.1, side="buy", price=1.02, size=15.0),
-            Backtrade(ts=2.1, side="buy", price=1.02, size=10.0),
+            Backtrade(ts=1.6, side="buy", price=1.02, size=10.0),
         ],
         decision_interval_s=1.0,
         quote_refresh_s=10.0,

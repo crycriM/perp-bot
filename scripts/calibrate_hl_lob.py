@@ -37,6 +37,8 @@ async def calibrate_coin(args, coin: str) -> dict:
                 "price_tick": float(rules["price_tick"]),
                 "start_equity": args.start_equity,
                 "tick_s": args.tick_s,
+                "decision_interval_s": args.decision_interval_s,
+                "quote_refresh_s": args.quote_refresh_s,
                 "max_position_multiple": args.max_position_multiple,
             }
             train_metrics = await replay_candidate(train, **common)
@@ -75,6 +77,8 @@ async def run(args) -> dict:
         "passed": all(result["selected"] is not None for result in results),
         "train_fraction": args.train_fraction,
         "tick_s": args.tick_s,
+        "decision_interval_s": args.decision_interval_s,
+        "quote_refresh_s": args.quote_refresh_s,
         "start_equity": args.start_equity,
         "results": results,
     }
@@ -91,13 +95,16 @@ def main() -> int:
                         default=_floats("1000,2000,3000,5000,8000,12000,20000"))
     parser.add_argument("--train-fraction", type=float, default=2.0 / 3.0)
     parser.add_argument("--tick-s", type=float, default=0.5)
+    parser.add_argument("--decision-interval-s", type=float, default=5.0)
+    parser.add_argument("--quote-refresh-s", type=float, default=20.0)
     parser.add_argument("--min-fills", type=int, default=10)
     parser.add_argument("--start-equity", type=float, default=300.0)
     parser.add_argument("--max-position-multiple", type=float, default=5.0)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    if args.tick_s <= 0 or args.min_fills <= 0 or args.start_equity <= 0:
-        parser.error("tick, min fills, and start equity must be positive")
+    if (min(args.tick_s, args.decision_interval_s, args.quote_refresh_s) <= 0
+            or args.min_fills <= 0 or args.start_equity <= 0):
+        parser.error("intervals, min fills, and start equity must be positive")
     report = asyncio.run(run(args))
     output = args.output or args.capture_dir / "calibration_report.json"
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

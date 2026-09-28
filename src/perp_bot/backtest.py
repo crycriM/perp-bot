@@ -95,9 +95,22 @@ class Backtest:
     two different pieces of math that can silently drift apart.
     """
 
-    def __init__(self, config, start_equity: float = 1.0, decision_log_path: str | None = None):
+    def __init__(
+        self,
+        config,
+        start_equity: float = 1.0,
+        decision_log_path: str | None = None,
+        decision_interval_s: float | None = None,
+        quote_refresh_s: float | None = None,
+    ):
+        if decision_interval_s is not None and decision_interval_s <= 0:
+            raise ValueError("decision_interval_s must be positive")
+        if quote_refresh_s is not None and quote_refresh_s <= 0:
+            raise ValueError("quote_refresh_s must be positive")
         self.config = config
         self.start_equity = start_equity
+        self._decision_interval_s = decision_interval_s
+        self._quote_refresh_s = quote_refresh_s
         self._trades: list[Backtrade] = []
         self._funding_events: list = []
         self._snapshots: list[MarketSnapshot] = []
@@ -213,9 +226,12 @@ class Backtest:
 
         t0 = self._snapshots[0].ts if self._snapshots else time.time()
         t_end = t0 + duration_s
-        last_quote_ts = 0.0
         if tick_s <= 0:
             raise ValueError("tick_s must be > 0")
+        decision_interval_s = self._decision_interval_s or tick_s
+        quote_refresh_s = self._quote_refresh_s or decision_interval_s
+        last_decision_ts = t0 - decision_interval_s
+        last_quote_ts = -float("inf")
 
         t = t0
         while t < t_end:
@@ -257,8 +273,8 @@ class Backtest:
             self._equity = self.start_equity + self._pnl.explain(t, mid, include_events=False).total_pnl
 
             # Strategy decision every tick: cancel/replace, never stack quotes
-            if t - last_quote_ts >= tick_s:
-                last_quote_ts = t
+            if t - last_decision_ts >= decision_interval_s:
+                last_decision_ts = t
                 if self._strategy and len(self._mid_history) > 2:
                     intent = self._strategy(self.config, self._inventory, self._equity,
                                            self._mid_history, t, mid)
@@ -289,12 +305,19 @@ class Backtest:
                         regime_sample_interval_s=regime.sample_interval_s if regime else None,
                         regime_history_span_s=regime.history_span_s if regime else None,
                     ))
-                    self._resting_orders = []
                     if intent and intent.quote:
-                        for side in ("bid", "ask"):
-                            price = getattr(intent.quote, f"{side}_price")
-                            size = getattr(intent.quote, f"{side}_size")
-                            if price is not None and size > 0:
+                        desired = [
+                            (side, getattr(intent.quote, f"{side}_price"),
+                             getattr(intent.quote, f"{side}_size"))
+                            for side in ("bid", "ask")
+                            if getattr(intent.quote, f"{side}_price") is not None
+                            and getattr(intent.quote, f"{side}_size") > 0
+                        ]
+                        if (len(self._resting_orders) != len(desired)
+                                or t - last_quote_ts >= quote_refresh_s):
+                            self._resting_orders = []
+                            last_quote_ts = t
+                            for side, price, size in desired:
                                 self._resting_orders.append(
                                     {
                                         "side": side,
@@ -303,6 +326,7 @@ class Backtest:
                                         "queue_ahead": self._visible_queue(side, price),
                                     })
                     elif intent:
+                        self._resting_orders = []
                         self._execute_close(t, mid, intent)
 
             self._history.append({

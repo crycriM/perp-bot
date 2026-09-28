@@ -51,6 +51,8 @@ async def replay_candidate(
     price_tick: float,
     start_equity: float,
     tick_s: float,
+    decision_interval_s: float,
+    quote_refresh_s: float,
     max_position_multiple: float,
 ) -> dict:
     if not data.books:
@@ -64,7 +66,12 @@ async def replay_candidate(
         price_tick=price_tick,
         caps=Caps(max_position=max_position, critical_position=max_position * 2.0),
     )
-    backtest = Backtest(config, start_equity=start_equity)
+    backtest = Backtest(
+        config,
+        start_equity=start_equity,
+        decision_interval_s=decision_interval_s,
+        quote_refresh_s=quote_refresh_s,
+    )
     backtest.set_strategy(Strategy(config))
     for book in data.books:
         backtest.add_book(book)
