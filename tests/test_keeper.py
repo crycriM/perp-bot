@@ -138,6 +138,31 @@ def test_quote_builder_is_price_scale_invariant_and_uses_venue_grid():
     )
 
 
+def test_quote_builder_normalizes_inventory_by_cap():
+    low_config = PerpPairConfig(
+        coin="ENA", gamma=10.0, kappa=1000.0,
+        quote_size=40.0, price_tick=0.00001,
+        caps=Caps(max_position=400.0, critical_position=500.0),
+    )
+    high_config = PerpPairConfig(
+        coin="ENA", gamma=10.0, kappa=1000.0,
+        quote_size=0.04, price_tick=0.01,
+        caps=Caps(max_position=0.4, critical_position=0.5),
+    )
+
+    low = build_intent(
+        low_config, Decision.QUOTE, "passive", 0.25, 40.0,
+        [(0.0, 0.24), (900.0, 0.25), (1800.0, 0.25)], 400.0,
+    ).quote
+    high = build_intent(
+        high_config, Decision.QUOTE, "passive", 250.0, 0.04,
+        [(0.0, 240.0), (900.0, 250.0), (1800.0, 250.0)], 0.4,
+    ).quote
+
+    assert high.bid_price / low.bid_price == pytest.approx(1000.0)
+    assert high.ask_price / low.ask_price == pytest.approx(1000.0)
+
+
 @pytest.mark.asyncio
 async def test_keeper_intents_use_configured_exchange_as_venue():
     """ExecIntent.venue must be a real AdapterRegistry/AccountRegistry key
