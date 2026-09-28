@@ -77,7 +77,7 @@ def candle_trades(candles: list[dict]):
         first, second = (l, h) if cl >= o else (h, l)
         first_side, second_side = ("sell", "buy") if cl >= o else ("buy", "sell")
         yield {"ts": ts, "side": first_side, "price": first, "size": half}
-        yield {"ts": ts + 0.001, "side": second_side, "price": second, "size": half}
+        yield {"ts": ts, "side": second_side, "price": second, "size": half}
 
 
 def funding_events(funding: list[dict]):

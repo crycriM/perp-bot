@@ -108,10 +108,12 @@ def test_quote_builder_is_price_scale_invariant_and_uses_venue_grid():
     low_config = PerpPairConfig(
         coin="ENA", gamma=10.0, kappa=1000.0,
         quote_size=40.0, price_tick=0.00001,
+        caps=Caps(max_position=400.0, critical_position=500.0),
     )
     high_config = PerpPairConfig(
         coin="ENA", gamma=10.0, kappa=1000.0,
         quote_size=40.0, price_tick=0.01,
+        caps=Caps(max_position=400.0, critical_position=500.0),
     )
 
     low = build_intent(

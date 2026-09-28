@@ -14,7 +14,7 @@ from mm_core.markout import MarkoutTracker
 from mm_core.pnl import Fill, PnLLedger
 from mm_core.risk_policy import Decision, RiskPolicy
 from mm_core.regime import evaluate_regime
-from mm_core.as_core import gueant_half_spread, gueant_reservation_price
+from mm_core.as_core import gueant_quote_prices
 from mm_core.vol import VOLATILITY_MODELS
 
 from perp_bot.config import PerpPairConfig
@@ -26,8 +26,16 @@ logger = logging.getLogger(__name__)
 MID_HISTORY_LEN = 200  # regime/vol window; the backtest slices to the same length
 
 
-def _quote_price(price: float, size: float) -> float | None:
-    return price if size > 0 and math.isfinite(price) and price > 0 else None
+def _quote_price(
+    price: float, size: float, tick: float | None, *, round_up: bool,
+) -> float | None:
+    if size <= 0 or not math.isfinite(price) or price <= 0:
+        return None
+    if tick is not None:
+        units = price / tick
+        price = (math.ceil(units - 1e-12) if round_up
+                 else math.floor(units + 1e-12)) * tick
+    return price if price > 0 else None
 
 @dataclass
 class DecisionRecord:
@@ -285,38 +293,50 @@ def build_intent(
     kappa = config.kappa
 
     q_target = config.target_inventory
+    nominal_size = config.quote_size or max_position * 0.1
 
     if decision == Decision.QUOTE:
-        r = gueant_reservation_price(mid, pos, gamma, sigma, kappa, q_target=q_target)
-        hs = gueant_half_spread(gamma, sigma, kappa)
+        bid_price, ask_price = gueant_quote_prices(
+            mid, pos, gamma, sigma, kappa, q_target=q_target,
+        )
         bid_size, ask_size = bounded_quote_sizes(
-            pos, q_target, max_position, max_position * 0.1
+            pos, q_target, max_position, nominal_size
         )
         return ExecIntent(
             venue=config.exchange, coin=coin, account_id=config.account_id,
             target_inventory=q_target,
             current_inventory=pos,
             quote=QuoteSpec(
-                bid_price=_quote_price(r - hs, bid_size),
-                ask_price=_quote_price(r + hs, ask_size),
+                bid_price=_quote_price(
+                    bid_price, bid_size, config.price_tick, round_up=False,
+                ),
+                ask_price=_quote_price(
+                    ask_price, ask_size, config.price_tick, round_up=True,
+                ),
                 bid_size=bid_size,
                 ask_size=ask_size,
             ),
             urgency=urgency,
         )
     elif decision == Decision.WIDEN:
-        r = gueant_reservation_price(mid, pos, gamma, sigma, kappa, q_target=q_target)
-        hs = gueant_half_spread(gamma, sigma, kappa) * config.widen_factor
+        bid_price, ask_price = gueant_quote_prices(
+            mid, pos, gamma, sigma, kappa, q_target=q_target,
+            spread_multiplier=config.widen_factor,
+        )
         bid_size, ask_size = bounded_quote_sizes(
-            pos, q_target, max_position, max_position * 0.05
+            pos, q_target, max_position, nominal_size * 0.5
         )
         return ExecIntent(
             venue=config.exchange, coin=coin, account_id=config.account_id,
             target_inventory=q_target,
             current_inventory=pos,
             quote=QuoteSpec(
-                bid_price=_quote_price(r - hs, bid_size),
-                ask_price=_quote_price(r + hs, ask_size),
+                bid_price=_quote_price(
+                    bid_price, bid_size, config.price_tick, round_up=False,
+                ),
+                ask_price=_quote_price(
+                    ask_price, ask_size, config.price_tick, round_up=True,
+                ),
                 bid_size=bid_size,
                 ask_size=ask_size,
             ),

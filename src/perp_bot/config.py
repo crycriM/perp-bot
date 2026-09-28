@@ -20,6 +20,8 @@ class PerpPairConfig:
     funding_interval_s: float = 3600.0  # HL funding cadence; ledger accrues pro-rata
     target_inventory: float = 0.0  # structural tilt, e.g. one leg of a cross-hedged subaccount pair
     leverage: int = 1  # user-selected perp leverage; used by execution and margin sizing
+    quote_size: float | None = None  # explicit venue-quantized base size; defaults to 10% of cap
+    price_tick: float | None = None  # venue tick used by replay/live intent prices
     caps: Caps = None
     gate: GateConfig = None
     risk: RiskConfig = None
@@ -35,6 +37,10 @@ class PerpPairConfig:
             )
         if self.caps is None:
             self.caps = Caps(max_position=10.0, critical_position=20.0)
+        if self.quote_size is not None and self.quote_size <= 0:
+            raise ValueError("quote_size must be positive")
+        if self.price_tick is not None and self.price_tick <= 0:
+            raise ValueError("price_tick must be positive")
         if self.gate is None:
             self.gate = GateConfig()
         if self.risk is None:
