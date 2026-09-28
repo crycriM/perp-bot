@@ -2,6 +2,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import math
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -23,6 +24,10 @@ from perp_bot.opms_client import OpmsClient
 logger = logging.getLogger(__name__)
 
 MID_HISTORY_LEN = 200  # regime/vol window; the backtest slices to the same length
+
+
+def _quote_price(price: float, size: float) -> float | None:
+    return price if size > 0 and math.isfinite(price) and price > 0 else None
 
 @dataclass
 class DecisionRecord:
@@ -292,8 +297,8 @@ def build_intent(
             target_inventory=q_target,
             current_inventory=pos,
             quote=QuoteSpec(
-                bid_price=r - hs if bid_size > 0 else None,
-                ask_price=r + hs if ask_size > 0 else None,
+                bid_price=_quote_price(r - hs, bid_size),
+                ask_price=_quote_price(r + hs, ask_size),
                 bid_size=bid_size,
                 ask_size=ask_size,
             ),
@@ -310,8 +315,8 @@ def build_intent(
             target_inventory=q_target,
             current_inventory=pos,
             quote=QuoteSpec(
-                bid_price=r - hs if bid_size > 0 else None,
-                ask_price=r + hs if ask_size > 0 else None,
+                bid_price=_quote_price(r - hs, bid_size),
+                ask_price=_quote_price(r + hs, ask_size),
                 bid_size=bid_size,
                 ask_size=ask_size,
             ),
