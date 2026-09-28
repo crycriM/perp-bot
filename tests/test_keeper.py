@@ -177,12 +177,8 @@ async def test_keeper_de_risk_targets_structural_tilt_not_zero():
 
 
 @pytest.mark.asyncio
-async def test_keeper_quote_stop_flattens_residual_inventory():
-    """A regime/gap stop must not leave the last maker fill exposed forever.
-
-    Unlike DE_RISK, STOP_QUOTING deliberately ignores the structural tilt: it
-    cancels quotes and asks OPMS for a bounded reduce-only flatten to zero.
-    """
+async def test_keeper_quote_stop_cancels_without_per_leg_flatten():
+    """Only the basket coordinator may turn a quote stop into a close."""
     config = PerpPairConfig(
         coin="BTC", gamma=1.0, kappa=0.5, target_inventory=4.0,
         caps=Caps(max_position=10.0, critical_position=20.0),
@@ -198,9 +194,26 @@ async def test_keeper_quote_stop_flattens_residual_inventory():
 
     assert intent.quote is None
     assert intent.current_inventory == pytest.approx(-2.0)
-    assert intent.target_inventory == 0.0
+    assert intent.target_inventory == pytest.approx(-2.0)
     assert intent.urgency == "immediate"
     assert intent.strategy_hint == "passive_aggressive"
+
+
+@pytest.mark.asyncio
+async def test_transformed_portfolio_intent_is_sent_and_logged(tmp_path):
+    client = FakeOpmsClient(snapshots(), position=1.0)
+    log = tmp_path / "decisions.jsonl"
+    keeper = make_keeper(client, decision_log_path=str(log))
+    keeper.intent_transform = lambda decision, intent, pos, mid: ExecIntent(
+        venue="hyperliquid", coin="BTC", target_inventory=0.75,
+        current_inventory=pos, quote=None, urgency="immediate",
+    )
+    await client.start()
+    await keeper._tick()
+    await keeper.stop()
+    record = json.loads(log.read_text().splitlines()[-1])
+    assert client.sends[-1].target_inventory == 0.75
+    assert record["intent"]["target_inventory"] == 0.75
 
 
 @pytest.mark.asyncio

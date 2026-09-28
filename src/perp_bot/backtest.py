@@ -11,7 +11,7 @@ from mm_core.inventory import Caps, PerpInventory
 from mm_core.markout import MarkoutTracker
 from mm_core.pnl import Fill, PnLLedger
 from mm_core.regime import evaluate_regime
-from mm_core.risk_policy import RiskPolicy
+from mm_core.risk_policy import Decision, RiskPolicy
 
 from perp_bot.keeper import MID_HISTORY_LEN, build_intent
 
@@ -44,6 +44,19 @@ class BacktestDecisionRecord:
     inventory: float
     equity: float
     intent: ExecIntent | None
+    decision: str | None = None
+    urgency: str | None = None
+    regime: str | None = None
+    regime_half_life: float | None = None
+    regime_hurst: float | None = None
+    regime_trending: bool | None = None
+    regime_state: str | None = None
+    regime_transition: str | None = None
+    regime_raw_open: bool | None = None
+    regime_provisional: bool = False
+    regime_sample_count: int | None = None
+    regime_sample_interval_s: float | None = None
+    regime_history_span_s: float | None = None
 
 
 def infer_tick_s_from_snapshots(snapshots: list[MarketSnapshot], default: float = 1.0) -> float:
@@ -190,6 +203,9 @@ class Backtest:
                 if self._strategy and len(self._mid_history) > 2:
                     intent = self._strategy(self.config, self._inventory, self._equity,
                                            self._mid_history, t, mid)
+                    regime = getattr(self._strategy, "last_regime", None)
+                    gate = getattr(getattr(self._strategy, "risk", None), "last_regime_gate", None)
+                    decision = getattr(self._strategy, "last_decision", None)
                     self._log_decision(BacktestDecisionRecord(
                         source="backtest",
                         ts=t,
@@ -197,6 +213,22 @@ class Backtest:
                         inventory=self._inventory.position,
                         equity=self._equity,
                         intent=intent,
+                        decision=decision.value if decision else None,
+                        urgency=getattr(self._strategy, "last_urgency", None),
+                        regime=(
+                            f"hl={regime.half_life:.0f},h={regime.hurst:.2f}"
+                            if regime else None
+                        ),
+                        regime_half_life=regime.half_life if regime else None,
+                        regime_hurst=regime.hurst if regime else None,
+                        regime_trending=regime.trending if regime else None,
+                        regime_state=gate.state.value if gate else None,
+                        regime_transition=gate.transition if gate else None,
+                        regime_raw_open=gate.raw_open if gate else None,
+                        regime_provisional=gate.provisional if gate else False,
+                        regime_sample_count=regime.sample_count if regime else None,
+                        regime_sample_interval_s=regime.sample_interval_s if regime else None,
+                        regime_history_span_s=regime.history_span_s if regime else None,
                     ))
                     self._resting_orders = []
                     if intent and intent.quote:
@@ -309,6 +341,9 @@ class Strategy:
     risk: RiskPolicy | None = None
     markout: MarkoutTracker = field(
         default_factory=lambda: MarkoutTracker(horizons=(10.0, 30.0, 60.0)))
+    last_regime: object | None = field(default=None, init=False)
+    last_decision: Decision | None = field(default=None, init=False)
+    last_urgency: str | None = field(default=None, init=False)
 
     def __post_init__(self):
         if self.risk is None and self.config is not None:
@@ -318,14 +353,18 @@ class Strategy:
         if not mid_history or len(mid_history) < 2:
             return None
         history = list(mid_history[-MID_HISTORY_LEN:])
+        regime = evaluate_regime(history)
         decision, urgency = self.risk.evaluate(
             ts=ts, mid=mid, equity=equity, inventory=inventory,
-            regime=evaluate_regime(history),
+            regime=regime,
             avg_markout_bps=self.markout.avg_markout_bps(30.0),
             target_inventory=config.target_inventory,
             # ponytail: no margin model in the backtest, so margin checks are off
             margin_available=None,
         )
+        self.last_regime = regime
+        self.last_decision = decision
+        self.last_urgency = urgency
         return build_intent(config, decision, urgency, mid, inventory.position,
                             history, inventory.caps().max_position)
 

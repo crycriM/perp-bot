@@ -257,9 +257,8 @@ def test_gate_report_passes_when_all_metrics_within_bounds():
     assert report["checks"]["liquidations"] == {"passed": True, "value": 0, "threshold": 0}
 
 
-def test_strategy_runs_live_risk_path_and_flattens_on_closed_gate():
-    """Trending mids close the regime gate -> STOP_QUOTING -> no quotes, and the
-    held position is flattened, exactly as the live keeper would do."""
+def test_strategy_runs_live_risk_path_and_cancels_on_closed_gate():
+    """Trending mids close the gate without flattening an individual leg."""
     import asyncio
     from mm_core.pnl import Fill
 
@@ -275,4 +274,4 @@ def test_strategy_runs_live_risk_path_and_flattens_on_closed_gate():
     asyncio.run(bt.run(duration_s=80.0))
 
     assert bt._resting_orders == []
-    assert bt._pnl.position == pytest.approx(0.0)
+    assert bt._pnl.position == pytest.approx(1.0)

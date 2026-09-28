@@ -5,6 +5,7 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass
+from typing import Callable
 
 from mm_core.contracts import ExecIntent, MarketSnapshot, QuoteSpec
 from mm_core.inventory import PerpInventory
@@ -37,6 +38,16 @@ class DecisionRecord:
     total_pnl: float
     intent_sent: bool
     intent: ExecIntent | None
+    regime_state: str = "unknown"
+    regime_transition: str | None = None
+    regime_raw_open: bool | None = None
+    regime_provisional: bool = False
+    regime_half_life: float | None = None
+    regime_hurst: float | None = None
+    regime_trending: bool | None = None
+    regime_sample_count: int | None = None
+    regime_sample_interval_s: float | None = None
+    regime_history_span_s: float | None = None
 
 class Keeper:
     """Keeper loop: ingest, evaluate, actuate via intents."""
@@ -54,6 +65,7 @@ class Keeper:
         self.tick_s = tick_s
         self.shadow_mode = shadow_mode
         self._risk = RiskPolicy(cfg=config.risk)
+        self.intent_transform: Callable[[Decision, ExecIntent | None, float, float], ExecIntent | None] | None = None
         self._markout = MarkoutTracker(horizons=(10.0, 30.0, 60.0))
         self._pnl = PnLLedger(venue=config.exchange, symbol=config.coin)
         self._inventory = PerpInventory(position=0.0, _caps=config.caps)
@@ -196,8 +208,11 @@ class Keeper:
                 target_inventory=self.config.target_inventory,
                 margin_available=self._margin_available,
             )
+            gate = self._risk.last_regime_gate
 
             intent = self._actuate(decision, urgency, ts, mid, regime)
+            if self.intent_transform is not None:
+                intent = self.intent_transform(decision, intent, self._inventory.position, mid)
             intent_sent = False
             if intent:
                 if self.shadow_mode:
@@ -218,6 +233,16 @@ class Keeper:
                 total_pnl=total_pnl,
                 intent_sent=intent_sent,
                 intent=intent,
+                regime_state=gate.state.value if gate else "unknown",
+                regime_transition=gate.transition if gate else None,
+                regime_raw_open=gate.raw_open if gate else None,
+                regime_provisional=gate.provisional if gate else False,
+                regime_half_life=regime.half_life,
+                regime_hurst=regime.hurst,
+                regime_trending=regime.trending,
+                regime_sample_count=regime.sample_count,
+                regime_sample_interval_s=regime.sample_interval_s,
+                regime_history_span_s=regime.history_span_s,
             )
             self._log_decision(record)
             logger.info(
@@ -293,14 +318,11 @@ def build_intent(
             urgency=urgency,
         )
     elif decision == Decision.STOP_QUOTING:
-        # A stopped market cannot work a maker fill back out. Flatten the
-        # residual rather than holding it unquoted for an unbounded time.
-        # The execution layer maps ``immediate`` to a bounded reduce-only
-        # passive/aggressive close, so this can never add exposure toward
-        # the structural tilt or flip the position through flat.
+        # Cancel this leg's quotes. Only the portfolio coordinator may set a
+        # nontrivial stop target: zero net USDC is a basket, not a leg, goal.
         return ExecIntent(
             venue=config.exchange, coin=coin, account_id=config.account_id,
-            target_inventory=0.0,
+            target_inventory=pos,
             current_inventory=pos,
             quote=None,
             urgency=urgency,
