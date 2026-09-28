@@ -8,7 +8,7 @@ from mm_core.inventory import Caps
 
 from perp_bot.backtest import Backtest, BacktestBook, Backtrade
 from perp_bot.config import PerpPairConfig
-from perp_bot.hl_lob import load_lob_capture
+from perp_bot.hl_lob import load_lob_capture, split_lob_replay
 
 
 def _write_events(path, events):
@@ -50,6 +50,39 @@ def test_load_lob_capture_maps_sides_deduplicates_and_bounds_trades(tmp_path):
     ]
     assert replay.books[0].bids == ((1.0, 100.0),)
     assert replay.books[0].asks == ((1.02, 200.0),)
+
+
+def test_split_lob_replay_keeps_train_and_oos_disjoint(tmp_path):
+    path = tmp_path / "events.jsonl"
+    events = []
+    for ts in (1000, 2000, 3000, 4000):
+        events.append({
+            "channel": "l2Book",
+            "data": {
+                "coin": "ENA",
+                "time": ts,
+                "levels": [
+                    [{"px": "1.00", "sz": "100", "n": 1}],
+                    [{"px": "1.02", "sz": "200", "n": 1}],
+                ],
+            },
+        })
+        events.append({
+            "channel": "trades",
+            "data": [{
+                "coin": "ENA", "side": "B", "px": "1.02", "sz": "1",
+                "time": ts, "tid": ts,
+            }],
+        })
+    _write_events(path, events)
+
+    train, oos = split_lob_replay(load_lob_capture(path, "ENA"), 0.5)
+
+    assert [book.ts for book in train.books] == [1.0, 2.0]
+    assert [book.ts for book in oos.books] == [3.0, 4.0]
+    assert {trade.ts for trade in train.trades}.isdisjoint(
+        trade.ts for trade in oos.trades
+    )
 
 
 def _fixed_strategy(bid, ask, size):
