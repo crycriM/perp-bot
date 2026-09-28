@@ -85,9 +85,10 @@ def main() -> int:
     parser.add_argument("capture_dir", type=Path)
     parser.add_argument("coins", nargs="+", type=str.upper)
     parser.add_argument("--rules-dir", type=Path, default=Path("data/5m"))
-    parser.add_argument("--gammas", type=_floats, default=_floats("1,2,3,5,8,13"))
+    parser.add_argument("--gammas", type=_floats,
+                        default=_floats("0.25,0.5,1,2,3,5,8"))
     parser.add_argument("--kappas", type=_floats,
-                        default=_floats("100,200,300,400,600,800,1000,1500"))
+                        default=_floats("1000,2000,3000,5000,8000,12000,20000"))
     parser.add_argument("--train-fraction", type=float, default=2.0 / 3.0)
     parser.add_argument("--tick-s", type=float, default=0.5)
     parser.add_argument("--min-fills", type=int, default=10)
