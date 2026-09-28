@@ -3,7 +3,9 @@ directly (no hyperliquid SDK dependency)."""
 
 import argparse
 import csv
+import json
 import time
+from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 
 import requests
@@ -14,6 +16,47 @@ TESTNET_API = "https://api.hyperliquid-testnet.xyz"
 INTERVAL_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000}
 MAX_BARS_PER_CALL = 5000
 FUNDING_WINDOW_MS = 400 * 3_600_000
+
+
+def derive_venue_rules(
+    asset: dict, context: dict, *, quote_notional: float = 25.0,
+    min_notional: float = 10.0,
+) -> dict:
+    """Derive HL's executable size grid and five-significant-figure tick."""
+    mark = Decimal(context["markPx"])
+    if mark <= 0 or quote_notional < min_notional:
+        raise ValueError("mark must be positive and quote notional must meet the venue minimum")
+    size_step = Decimal(1).scaleb(-int(asset["szDecimals"]))
+    max_price_decimals = 6 - int(asset["szDecimals"])
+    tick_exponent = max(mark.adjusted() - 4, -max_price_decimals)
+    price_tick = Decimal(1).scaleb(tick_exponent)
+
+    def size_for(notional: float) -> Decimal:
+        units = (Decimal(str(notional)) / mark / size_step).to_integral_value(
+            rounding=ROUND_CEILING,
+        )
+        return units * size_step
+
+    return {
+        "coin": asset["name"],
+        "mark_price": float(mark),
+        "size_step": float(size_step),
+        "price_tick": float(price_tick),
+        "min_notional": float(min_notional),
+        "min_order_size": float(size_for(min_notional)),
+        "quote_notional": float(quote_notional),
+        "quote_size": float(size_for(quote_notional)),
+    }
+
+
+def fetch_venue_rules(base_url: str, coin: str, quote_notional: float) -> dict:
+    resp = requests.post(f"{base_url}/info", json={"type": "metaAndAssetCtxs"})
+    resp.raise_for_status()
+    meta, contexts = resp.json()
+    for asset, context in zip(meta["universe"], contexts):
+        if asset["name"] == coin:
+            return derive_venue_rules(asset, context, quote_notional=quote_notional)
+    raise ValueError(f"Hyperliquid market not found: {coin}")
 
 
 def fetch(coin: str, days: int, interval: str, testnet: bool):
@@ -101,10 +144,14 @@ def main():
                           "granularity (~3.5d at 1m, ~15d at 5m, 30+ at 15m/1h) — pick one "
                           "that covers --days or older bars silently come back empty")
     ap.add_argument("--out", default="data", help="output directory")
+    ap.add_argument("--quote-notional", type=float, default=25.0,
+                    help="calibration quote notional; rounded up to the live size grid")
     ap.add_argument("--testnet", action="store_true")
     args = ap.parse_args()
 
     candles, funding = fetch(args.coin, args.days, args.interval, args.testnet)
+    base_url = TESTNET_API if args.testnet else MAINNET_API
+    rules = fetch_venue_rules(base_url, args.coin, args.quote_notional)
     outdir = Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -114,8 +161,12 @@ def main():
               ["ts", "side", "price", "size"])
     write_csv(outdir / f"{args.coin}_funding.csv", funding_events(funding),
               ["ts", "rate"])
+    (outdir / f"{args.coin}_rules.json").write_text(
+        json.dumps(rules, indent=2, sort_keys=True) + "\n"
+    )
 
-    print(f"{args.coin}: {len(candles)} candles, {len(funding)} funding events -> {outdir}/")
+    print(f"{args.coin}: {len(candles)} candles, {len(funding)} funding events, "
+          f"quote_size={rules['quote_size']:g}, tick={rules['price_tick']:g} -> {outdir}/")
 
 
 if __name__ == "__main__":
