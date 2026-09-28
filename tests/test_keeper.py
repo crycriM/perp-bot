@@ -104,17 +104,36 @@ async def test_keeper_normal_quote():
     assert quote_intents[-1].current_inventory == 0.0
 
 
-def test_quote_builder_omits_nonpositive_prices():
-    config = PerpPairConfig(coin="ENA", gamma=1.0, kappa=0.001)
-
-    intent = build_intent(
-        config, Decision.QUOTE, "passive", 0.25, 0.0,
-        [(0.0, 0.25), (900.0, 0.25), (1800.0, 0.25)],
-        config.caps.max_position,
+def test_quote_builder_is_price_scale_invariant_and_uses_venue_grid():
+    low_config = PerpPairConfig(
+        coin="ENA", gamma=10.0, kappa=1000.0,
+        quote_size=40.0, price_tick=0.00001,
+    )
+    high_config = PerpPairConfig(
+        coin="ENA", gamma=10.0, kappa=1000.0,
+        quote_size=40.0, price_tick=0.01,
     )
 
-    assert intent.quote.bid_price is None
-    assert intent.quote.ask_price > 0
+    low = build_intent(
+        low_config, Decision.QUOTE, "passive", 0.25, 0.0,
+        [(0.0, 0.24), (900.0, 0.25), (1800.0, 0.25)],
+        low_config.caps.max_position,
+    ).quote
+    high = build_intent(
+        high_config, Decision.QUOTE, "passive", 250.0, 0.0,
+        [(0.0, 240.0), (900.0, 250.0), (1800.0, 250.0)],
+        high_config.caps.max_position,
+    ).quote
+
+    assert high.bid_price / low.bid_price == pytest.approx(1000.0)
+    assert high.ask_price / low.ask_price == pytest.approx(1000.0)
+    assert low.bid_size == low.ask_size == 40.0
+    assert low.bid_price / low_config.price_tick == pytest.approx(
+        round(low.bid_price / low_config.price_tick)
+    )
+    assert low.ask_price / low_config.price_tick == pytest.approx(
+        round(low.ask_price / low_config.price_tick)
+    )
 
 
 @pytest.mark.asyncio
