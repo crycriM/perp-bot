@@ -16,11 +16,12 @@ from perp_bot.config import PerpPairConfig
 from perp_bot.hl_lob import LobReplayData
 
 
-def _slice_passes(metrics: dict, min_fills: int) -> bool:
+def _slice_passes(metrics: dict, min_fills: int,
+                  dd_limit: float = GATE_MAX_DRAWDOWN) -> bool:
     return (
         metrics["net_edge_bps"] > GATE_MIN_NET_EDGE_BPS
         and metrics["markout_ratio"] < GATE_MAX_MARKOUT_RATIO
-        and metrics["max_drawdown"] < GATE_MAX_DRAWDOWN
+        and metrics["max_drawdown"] < dd_limit
         and metrics.get("max_initial_margin_fraction", float("inf")) < .5
         and metrics["n_fills"] >= min_fills
     )

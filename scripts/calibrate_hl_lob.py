@@ -22,6 +22,11 @@ from perp_bot.calibration import capture_quality, choose_candidate, estimate_par
 from perp_bot.hl_lob import load_lob_capture, split_lob_replay
 from perp_bot.lob_calibration import _slice_passes, replay_candidate
 
+# Screen approval must agree with the stop the prepared live bundle enforces
+# (hb-enhanced-opms prepare_calibrated_soak sets MAX_DRAWDOWN_PCT=1.0), or a
+# candidate could pass screening yet be force-stopped on day one.
+LIVE_DD_STOP_FRACTION = 0.01
+
 
 async def calibrate_coin(args, coin):
     data = load_lob_capture(args.capture_dir / "events.jsonl", coin)
@@ -83,7 +88,8 @@ async def calibrate_coin(args, coin):
     rows = []
     for params in candidates:
         rows.append(dict(parameters=params, validation=await replay(validation, params)))
-    eligible = [r for r in rows if _slice_passes(r["validation"], args.min_fills)]
+    eligible = [r for r in rows
+                if _slice_passes(r["validation"], args.min_fills, LIVE_DD_STOP_FRACTION)]
     # Do not inspect additional holdouts hoping to rescue a failed candidate.
     selected = choose_candidate(eligible or rows)
     params = selected["parameters"]
@@ -91,8 +97,9 @@ async def calibrate_coin(args, coin):
     selected["stress_holdout"] = await replay(holdout, params, stress=True)
     stress = selected["stress_holdout"]
     approved = (quality["passed"] and bool(eligible)
-                and _slice_passes(selected["holdout"], args.min_fills)
-                and stress["net_pnl"] > 0 and stress["max_drawdown"] < .01
+                and _slice_passes(selected["holdout"], args.min_fills, LIVE_DD_STOP_FRACTION)
+                and stress["net_pnl"] > 0
+                and stress["max_drawdown"] < LIVE_DD_STOP_FRACTION
                 and stress["max_initial_margin_fraction"] < .5)
     result.update(selected=selected, candidates=rows, policy=common_policy,
         approved_for_micro_soak=approved, regime_stop=False, toxic_markout_bps=-1,

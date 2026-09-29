@@ -319,3 +319,61 @@ class TestCalibrateHoldoutIsolation:
         assert len(report["capture_sha256"]) == 64
         row = report["results"][0]["selected"]["holdout"]
         assert row["net_edge_bps"] is None and row["markout_ratio"] is None
+
+
+class TestScreenLiveDrawdownParity:
+    """The prepared live soak stops at 1% account DD (MAX_DRAWDOWN_PCT=1.0).
+    A candidate whose validation/holdout history would breach that stop must
+    not be screened as eligible; the generic rollout gate (5%) must not be
+    used silently for calibration approval."""
+
+    @pytest.fixture()
+    def env(self, tmp_path, monkeypatch):
+        base = 1_700_000_100.0
+        capture = tmp_path / "events.jsonl"
+        _write_capture(capture, [
+            _book_line(base + t, 99.9, 100.1, int((base + t + 0.3) * 1000))
+            for t in range(40)
+        ] + [_trade_line(base + 30 + k * 0.4, 99.8, 1, 100 + k) for k in range(20)])
+        rules = tmp_path / "rules"
+        rules.mkdir()
+        (rules / "SOL_rules.json").write_text(json.dumps(
+            {"size_step": "0.01", "min_notional": "10", "quote_size": "1",
+             "price_tick": "0.001"}))
+        (rules / "SOL_funding.csv").write_text(
+            f"ts,rate\n{math.floor((base + 39) / 3600) * 3600},0.0001\n")
+        monkeypatch.setattr(calibrate_hl_lob, "capture_quality", lambda data: _good_quality())
+        monkeypatch.setattr(calibrate_hl_lob, "estimate_parameters", lambda train: dict(
+            arrival_rate_per_s=2.0, kappa_per_bps=0.4, sigma_bps_sqrt_s=1.0,
+            side_fits={}, estimator="test"))
+        return dict(tmp=tmp_path, rules=rules, base=base, capture=capture)
+
+    def _run(self, env):
+        return asyncio.run(calibrate_hl_lob.calibrate_coin(
+            _args(env["tmp"], env["rules"]), "SOL"))
+
+    def test_validation_dd_above_live_stop_disqualifies_the_edge_leader(self, env, monkeypatch):
+        async def dd_split(slice_, *, gamma, kappa, policy, **common):
+            if slice_.books[0].ts < env["base"] + 23:
+                raise AssertionError("train must not be replayed")
+            half = policy.get("fixed_half_spread_bps")
+            if slice_.books[0].ts > env["base"] + 31:
+                return _metrics(2.5, dd=0.005)
+            if half == 10:                      # edge leader breaches the live stop
+                return _metrics(9.0, dd=0.02)
+            if half == 6:
+                return _metrics(4.0, dd=0.005)
+            return _metrics(1.0, dd=0.001)
+        monkeypatch.setattr(calibrate_hl_lob, "replay_candidate", dd_split)
+        result = self._run(env)
+        assert result["selected"]["parameters"]["fixed_half_spread_bps"] == 6
+        assert result["approved_for_micro_soak"] is True
+
+    def test_only_dd_breaching_candidates_cannot_be_approved(self, env, monkeypatch):
+        async def all_hot(slice_, *, gamma, kappa, policy, **common):
+            if slice_.books[0].ts > env["base"] + 31:
+                return _metrics(9.0, dd=0.02)
+            return _metrics(9.0, dd=0.02)
+        monkeypatch.setattr(calibrate_hl_lob, "replay_candidate", all_hot)
+        result = self._run(env)
+        assert result["approved_for_micro_soak"] is False
