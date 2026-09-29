@@ -18,7 +18,7 @@ def subscription_messages(coins: list[str]) -> list[dict]:
     return [
         {"method": "subscribe", "subscription": {"type": channel, "coin": coin}}
         for coin in coins
-        for channel in ("l2Book", "trades")
+        for channel in ("l2Book", "bbo", "trades")
     ]
 
 
@@ -29,6 +29,10 @@ def _count_message(counts: dict, message: dict) -> None:
         coin = data.get("coin")
         if coin in counts:
             counts[coin]["books"] += 1
+    elif channel == "bbo" and isinstance(data, dict):
+        coin = data.get("coin")
+        if coin in counts:
+            counts[coin]["bbos"] += 1
     elif channel == "trades" and isinstance(data, list):
         for trade in data:
             coin = trade.get("coin")
@@ -41,7 +45,7 @@ async def capture(coins: list[str], duration: float, output_dir: Path) -> dict:
     stream_path = output_dir / "events.jsonl"
     started_ms = int(time.time() * 1000)
     deadline = asyncio.get_running_loop().time() + duration
-    counts = {coin: {"books": 0, "trades": 0} for coin in coins}
+    counts = {coin: {"books": 0, "bbos": 0, "trades": 0} for coin in coins}
     connections = 0
     errors = []
     backoff = 1.0
@@ -89,7 +93,7 @@ async def capture(coins: list[str], duration: float, output_dir: Path) -> dict:
         "connections": connections,
         "counts": counts,
         "errors": errors,
-        "passed": all(v["books"] > 0 and v["trades"] > 0 for v in counts.values()),
+        "passed": all(v["books"] > 0 and v["bbos"] > 0 and v["trades"] > 0 for v in counts.values()),
         "events_path": str(stream_path.resolve()),
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
