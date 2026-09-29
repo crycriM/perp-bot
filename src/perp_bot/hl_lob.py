@@ -73,7 +73,8 @@ def load_lob_capture(path: Path, coin: str) -> LobReplayData:
                         price=float(row["px"]),
                         size=float(row["sz"]),
                     )
-                    trades_by_id[row.get("tid", (trade.ts, trade.side, trade.price, trade.size))] = trade
+                    key = row.get("tid", row.get("trade_id"))  # HL tid / Lighter trade_id
+                    trades_by_id[key if key is not None else (trade.ts, trade.side, trade.price, trade.size)] = trade
 
     books.sort(key=lambda book: book.ts)
     if not books:

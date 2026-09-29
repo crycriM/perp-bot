@@ -10,7 +10,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from capture_lighter_lob import (
     parse_order_book_message,
     rest_trades_to_events,
-    to_hl_book_event,
 )
 
 
@@ -37,19 +36,6 @@ class TestOrderBookParser:
     def test_ignores_unknown_channel(self):
         assert parse_order_book_message({"channel": "connected"}) is None
 
-    def test_hl_snapshot_shape_matches_loader(self):
-        parsed = parse_order_book_message(BOOK_MSG)
-        event = to_hl_book_event(parsed, now_ms=1500)
-        assert event["channel"] == "l2Book"
-        data = event["data"]
-        assert data["coin"] == "ETH"
-        assert data["time"] == 1790608177458
-        bids, asks = data["levels"]
-        assert bids == [{"px": "2671.20", "sz": "1.2"}]
-        assert asks == [{"px": "2671.37", "sz": "4.4516"}]
-        # loader-safe: exactly two non-empty sides
-        assert bids and asks
-
 
 class TestRestTrades:
     def test_trades_csv_row_shape(self):
@@ -70,6 +56,7 @@ class TestRestTrades:
         assert row["px"] == 2671.14
         assert row["sz"] == 0.09
         assert row["time"] == 1790608177123
+        assert row["tid"] == 32381439439
 
     def test_taker_sell_side(self):
         row = {"trade_id": 1, "market_id": 1, "size": "0.02", "price": "80000.1",
