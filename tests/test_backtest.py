@@ -281,7 +281,7 @@ def test_strategy_runs_live_risk_path_and_cancels_on_closed_gate():
 
     config = make_config()
     config.target_inventory = 1.0  # structural portfolio leg, not a flat-target account
-    bt = Backtest(config, start_equity=10000.0)
+    bt = Backtest(config, start_equity=1_000_000.0)  # 1 BTC held: margin must not be the trigger here
     bt.set_strategy(Strategy(config))
     t0 = time.time()
     for i in range(80):

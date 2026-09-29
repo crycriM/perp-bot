@@ -31,3 +31,13 @@ def fail_closed_margin_available(value: object, *, source: str) -> float:
         )
         return 0.0
     return margin_available
+
+
+def initial_margin_available(*, equity: float, position: float, mid: float, leverage: float) -> float:
+    """Replay stand-in for the venue's available-after-maintenance balance.
+
+    Uses initial margin (notional / leverage), which is at least the maintenance
+    margin live uses, so replay is never less cautious than live. Not a
+    liquidation model.
+    """
+    return equity - abs(position) * mid / leverage

@@ -15,6 +15,7 @@ from mm_core.risk_policy import Decision, RiskPolicy
 from mm_core.quote_refresh import quote_refresh_reason
 
 from perp_bot.keeper import MID_HISTORY_LEN, build_intent
+from perp_bot.margin_health import initial_margin_available
 
 logger = logging.getLogger(__name__)
 
@@ -508,8 +509,9 @@ class Strategy:
             regime=regime,
             avg_markout_bps=self.markout.avg_markout_bps(30.0),
             target_inventory=config.target_inventory,
-            # ponytail: no margin model in the backtest, so margin checks are off
-            margin_available=None,
+            # initial-margin proxy: replay is never less cautious than live (no liquidation model)
+            margin_available=initial_margin_available(
+                equity=equity, position=inventory.position, mid=mid, leverage=config.leverage),
         )
         self.last_regime = regime
         self.last_decision = decision
