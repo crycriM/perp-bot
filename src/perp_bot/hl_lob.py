@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,11 +46,63 @@ def split_lob_replay(
     )
 
 
+MISMATCH_LIMIT = 3  # consecutive l2Book snapshots whose touch disagrees with the bbo stream
+
+
+class BookOverlay:
+    """HL's public l2Book is throttled to ~5.5 s while `bbo` runs at block cadence.
+
+    Keep the latest l2 depth and put the latest bbo touch on top of it. Shared by
+    the replay loader and the live Hummingbot connector patch so both see the same
+    book. Depth behind the touch is still up to ~5.5 s old.
+    """
+
+    def __init__(self):
+        self._bids = self._asks = None
+        self._bbo = None
+        self._history = deque(maxlen=128)  # (time_ms, bid_px, ask_px)
+        self._mismatch = 0
+
+    @property
+    def healthy(self) -> bool:
+        """False once the bbo stream has silently stopped tracking the venue."""
+        return self._mismatch < MISMATCH_LIMIT
+
+    def on_l2(self, time_ms, bids, asks):
+        # The last bbo at/before the snapshot must show the snapshot's own touch.
+        seen = next((h for h in reversed(self._history) if h[0] <= time_ms), None)
+        self._mismatch = 0 if seen and seen[1:] == (bids[0][0], asks[0][0]) else self._mismatch + 1
+        self._bids, self._asks = tuple(bids), tuple(asks)
+        if self._bbo and self._bbo[0] > time_ms:
+            return self._apply()
+        return self._bids, self._asks
+
+    def on_bbo(self, time_ms, bid, ask):
+        if bid is None or ask is None:
+            return None
+        if bid[0] >= ask[0]:
+            raise ValueError("crossed bbo")
+        self._bbo = (time_ms, bid, ask)
+        self._history.append((time_ms, bid[0], ask[0]))
+        return None if self._bids is None else self._apply()
+
+    def _apply(self):
+        _, bid, ask = self._bbo
+        return ((bid,) + tuple(x for x in self._bids if x[0] < bid[0]),
+                (ask,) + tuple(x for x in self._asks if x[0] > ask[0]))
+
+
 def load_lob_capture(path: Path, coin: str) -> LobReplayData:
     """Load one coin, excluding subscription-backfill trades outside book time."""
     coin = coin.upper()
     books: list[BacktestBook] = []
     trades_by_id: dict[object, Backtrade] = {}
+    overlay = BookOverlay()
+
+    def add_book(time_ms, received, bids, asks):
+        exchange_ts = float(time_ms) / 1000.0
+        books.append(BacktestBook(ts=max(exchange_ts, float(received) / 1000) if received else exchange_ts,
+                                  bids=bids, asks=asks, exchange_ts=exchange_ts if received else None))
 
     with path.open() as stream:
         for line in stream:
@@ -66,11 +119,12 @@ def load_lob_capture(path: Path, coin: str) -> LobReplayData:
                         or bids[0][0] >= asks[0][0]
                         or list(bids) != sorted(bids, reverse=True) or list(asks) != sorted(asks)):
                     raise ValueError(f"invalid/crossed/unsorted book for {coin}")
-                exchange_ts = float(data["time"]) / 1000.0
-                received = record.get("received_at_ms")
-                books.append(BacktestBook(ts=max(exchange_ts, float(received) / 1000) if received else exchange_ts,
-                                          bids=bids, asks=asks,
-                                          exchange_ts=exchange_ts if received else None))
+                add_book(data["time"], record.get("received_at_ms"), *overlay.on_l2(data["time"], bids, asks))
+            elif channel == "bbo" and isinstance(data, dict) and data.get("coin") == coin:
+                bid, ask = (None if not lvl else (float(lvl["px"]), float(lvl["sz"])) for lvl in data["bbo"])
+                merged = overlay.on_bbo(data["time"], bid, ask)
+                if merged:
+                    add_book(data["time"], record.get("received_at_ms"), *merged)
             elif channel == "trades" and isinstance(data, list):
                 for row in data:
                     if row.get("coin") != coin or row.get("side") not in {"A", "B"}:
