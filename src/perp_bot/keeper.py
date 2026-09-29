@@ -14,7 +14,7 @@ from mm_core.markout import MarkoutTracker
 from mm_core.pnl import Fill, PnLLedger
 from mm_core.risk_policy import Decision, RiskPolicy
 from mm_core.regime import evaluate_regime
-from mm_core.as_core import gueant_quote_prices
+from mm_core.as_core import gueant_quote_prices, glft_quote_prices
 from mm_core.vol import VOLATILITY_MODELS
 
 from perp_bot.config import PerpPairConfig
@@ -296,37 +296,40 @@ def build_intent(
     normalized_inventory = (pos - q_target) / max_position
     nominal_size = config.quote_size or max_position * 0.1
 
-    if decision == Decision.QUOTE:
-        bid_price, ask_price = gueant_quote_prices(
-            mid, normalized_inventory, gamma, sigma, kappa,
-        )
+    if decision in {Decision.QUOTE, Decision.WIDEN}:
+        multiplier = config.widen_factor if decision == Decision.WIDEN else 1.0
+        if config.pricing_model == "glft":
+            bid_price, ask_price = glft_quote_prices(
+                mid, (pos - q_target) / nominal_size, gamma,
+                config.sigma_bps_sqrt_s, kappa, config.arrival_rate_per_s,
+                spread_multiplier=multiplier,
+            )
+        elif config.pricing_model == "fixed":
+            half = config.fixed_half_spread_bps * multiplier / 1e4
+            bid_price, ask_price = mid * (1 - half), mid * (1 + half)
+        else:
+            bid_price, ask_price = gueant_quote_prices(
+                mid, normalized_inventory, gamma, sigma, kappa,
+                spread_multiplier=multiplier,
+            )
+        if config.pricing_model != "legacy":
+            floor = max(0.0, config.maker_fee_bps + config.min_edge_bps) / 1e4
+            bid_price = min(bid_price, mid * (1 - floor))
+            ask_price = max(ask_price, mid * (1 + floor))
+        # Halved quotes below the venue minimum are dropped by the executor,
+        # leaving no quotes at all; keep the floor (never above nominal).
+        # GLFT's A and inventory unit were estimated for this nominal lot.
+        widen_size = nominal_size * (0.5 if decision == Decision.WIDEN and config.pricing_model == "legacy" else 1)
+        if config.min_quote_notional > 0 and mid > 0:
+            widen_size = max(widen_size, min(nominal_size, config.min_quote_notional * 1.1 / mid))
         bid_size, ask_size = bounded_quote_sizes(
-            pos, q_target, max_position, nominal_size
+            pos, q_target, max_position, widen_size,
+            min_size=(config.min_quote_notional * 1.1 / min(bid_price, ask_price)
+                      if config.min_quote_notional and config.pricing_model != "legacy" else 0.0),
         )
-        return ExecIntent(
-            venue=config.exchange, coin=coin, account_id=config.account_id,
-            target_inventory=q_target,
-            current_inventory=pos,
-            quote=QuoteSpec(
-                bid_price=_quote_price(
-                    bid_price, bid_size, config.price_tick, round_up=False,
-                ),
-                ask_price=_quote_price(
-                    ask_price, ask_size, config.price_tick, round_up=True,
-                ),
-                bid_size=bid_size,
-                ask_size=ask_size,
-            ),
-            urgency=urgency,
-        )
-    elif decision == Decision.WIDEN:
-        bid_price, ask_price = gueant_quote_prices(
-            mid, normalized_inventory, gamma, sigma, kappa,
-            spread_multiplier=config.widen_factor,
-        )
-        bid_size, ask_size = bounded_quote_sizes(
-            pos, q_target, max_position, nominal_size * 0.5
-        )
+        if config.size_step:
+            bid_size = math.floor(bid_size / config.size_step + 1e-10) * config.size_step
+            ask_size = math.floor(ask_size / config.size_step + 1e-10) * config.size_step
         return ExecIntent(
             venue=config.exchange, coin=coin, account_id=config.account_id,
             target_inventory=q_target,
@@ -348,7 +351,7 @@ def build_intent(
         # nontrivial stop target: zero net USDC is a basket, not a leg, goal.
         return ExecIntent(
             venue=config.exchange, coin=coin, account_id=config.account_id,
-            target_inventory=pos,
+            target_inventory=0.0 if q_target == 0 else pos,
             current_inventory=pos,
             quote=None,
             urgency=urgency,
@@ -375,13 +378,13 @@ def build_intent(
     return None
 
 def bounded_quote_sizes(
-    position: float, target: float, cap: float, nominal_size: float
+    position: float, target: float, cap: float, nominal_size: float, *, min_size: float = 0.0,
 ) -> tuple[float, float]:
     """Return quote sizes whose *single full fill* stays inside safety bounds.
 
     Inventory is capped relative to the structural target.  The quote that
-    moves inventory toward that target is additionally clipped to land on
-    it, never jump across it.  For a directional structural leg, the
+    moves inventory toward that target may cross it by a minimum executable
+    lot, but can never cross flat or a hard cap. For a directional leg, the
     opposite quote is clipped at flat as well; the execution layer also
     marks that side reduce-only to protect against stale overlapping
     orders and position-cache lag.
@@ -392,9 +395,9 @@ def bounded_quote_sizes(
     ask_size = min(nominal_size, max(position - lower, 0.0))
 
     if position < target:
-        bid_size = min(bid_size, target - position)
+        bid_size = min(bid_size, max(target - position, min_size))
     elif position > target:
-        ask_size = min(ask_size, position - target)
+        ask_size = min(ask_size, max(position - target, min_size))
 
     # An inventory-reducing maker order is sent reduce-only by the
     # execution layer. Cap it to the position it can actually close, both
@@ -412,6 +415,6 @@ def bounded_quote_sizes(
 
     epsilon = 1e-12
     return (
-        0.0 if bid_size < epsilon else bid_size,
-        0.0 if ask_size < epsilon else ask_size,
+        0.0 if bid_size < max(epsilon, min_size) else bid_size,
+        0.0 if ask_size < max(epsilon, min_size) else ask_size,
     )

@@ -29,6 +29,7 @@ import yaml
 
 from mm_core.inventory import Caps
 from mm_core.risk_policy import RiskConfig
+from mm_core.regime import GateConfig
 
 from perp_bot.config import PerpPairConfig
 from perp_bot.keeper import Keeper
@@ -64,11 +65,17 @@ def pair_config(controller: dict) -> PerpPairConfig:
         exchange=controller["venue"],
         account_id=controller.get("account_id", "default"),
         target_inventory=float(controller.get("target_inventory", 0.0)),
+        **{key: controller[key] for key in (
+            "pricing_model", "arrival_rate_per_s", "sigma_bps_sqrt_s", "fixed_half_spread_bps",
+            "quote_size", "price_tick", "size_step", "min_quote_notional", "leverage",
+            "maker_fee_bps", "min_edge_bps") if key in controller},
         caps=Caps(max_position=float(controller.get("max_position", 10.0)),
                   critical_position=float(controller.get("critical_position", 20.0))),
         risk=RiskConfig(
             margin_health_soft=float(controller.get("margin_health_soft", 0.20)),
             margin_health_hard=float(controller.get("margin_health_hard", 0.10)),
+            gate=GateConfig(regime_stop=controller.get("regime_stop", True)),
+            toxic_markout_bps=controller.get("toxic_markout_bps", -1.0),
         ),
     )
 

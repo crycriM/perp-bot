@@ -6,7 +6,7 @@ def test_candidate_requires_each_slice_to_pass_gates_and_fill_floor():
         "net_edge_bps": 3.0,
         "markout_ratio": 0.2,
         "max_drawdown": 0.01,
-        "liquidations": 0,
+        "max_initial_margin_fraction": .1,
         "n_fills": 10,
     }
 

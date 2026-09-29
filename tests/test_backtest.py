@@ -79,7 +79,7 @@ def test_ask_fill_earns_the_spread():
     assert m["n_fills"] == 1
     assert bt._fills[0].side == "ask"
     # short 1 @ 50010 vs mid 50000 → +10 marked to mid
-    assert m["net_pnl"] == pytest.approx(10.0)
+    assert m["net_pnl"] == pytest.approx(10.0 - 50010 * 1.5 / 1e4)
 
 
 def test_bid_fill_earns_the_spread():
@@ -89,7 +89,7 @@ def test_bid_fill_earns_the_spread():
     m = bt.metrics()
     assert m["n_fills"] == 1
     assert bt._fills[0].side == "bid"
-    assert m["net_pnl"] == pytest.approx(10.0)
+    assert m["net_pnl"] == pytest.approx(10.0 - 49990 * 1.5 / 1e4)
 
 
 def test_quotes_are_replaced_not_stacked():
@@ -149,7 +149,7 @@ def test_funding_costs_longs_when_positive():
     asyncio.run(bt.run(duration_s=35.0))
 
     # long 1 @ 49995 vs mid 50000 → +5 edge, minus funding 50000*1e-4 = 5
-    assert bt.metrics()["net_pnl"] == pytest.approx(0.0, abs=1e-6)
+    assert bt.metrics()["net_pnl"] == pytest.approx(-49995 * 1.5 / 1e4, abs=1e-6)
 
 
 def test_metrics_shape():
@@ -262,15 +262,16 @@ def test_gate_report_fails_on_thin_edge_and_reports_thresholds():
     assert report["passed"] is False
     assert report["checks"]["net_edge_bps"]["passed"] is False
     assert report["checks"]["net_edge_bps"]["threshold"] == 2.0
-    assert report["checks"]["liquidations"]["passed"] is True
+    assert bt.metrics()["liquidations"] is None
+    assert report["checks"]["initial_margin"]["passed"] is True
 
 
 def test_gate_report_passes_when_all_metrics_within_bounds():
-    trades = [Backtrade(ts=5, side="buy", price=50020.0, size=1.0)]
-    bt = run_bt(fixed_quote_strategy(bid=49000.0, ask=50010.0), trades)
+    trades = [Backtrade(ts=5, side="buy", price=50030.0, size=.01)]
+    bt = run_bt(fixed_quote_strategy(bid=49000.0, ask=50020.0, size=.01), trades)
     report = bt.gate_report()
     assert report["checks"]["max_drawdown"]["passed"] is True
-    assert report["checks"]["liquidations"] == {"passed": True, "value": 0, "threshold": 0}
+    assert report["checks"]["initial_margin"]["passed"] is True
 
 
 def test_strategy_runs_live_risk_path_and_cancels_on_closed_gate():
@@ -279,6 +280,7 @@ def test_strategy_runs_live_risk_path_and_cancels_on_closed_gate():
     from mm_core.pnl import Fill
 
     config = make_config()
+    config.target_inventory = 1.0  # structural portfolio leg, not a flat-target account
     bt = Backtest(config, start_equity=10000.0)
     bt.set_strategy(Strategy(config))
     t0 = time.time()

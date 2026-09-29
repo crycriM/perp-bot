@@ -12,6 +12,7 @@ from mm_core.markout import MarkoutTracker
 from mm_core.pnl import Fill, PnLLedger
 from mm_core.regime import evaluate_regime
 from mm_core.risk_policy import Decision, RiskPolicy
+from mm_core.quote_refresh import quote_refresh_reason
 
 from perp_bot.keeper import MID_HISTORY_LEN, build_intent
 
@@ -43,6 +44,7 @@ class BacktestBook:
     ts: float
     bids: tuple[tuple[float, float], ...]
     asks: tuple[tuple[float, float], ...]
+    exchange_ts: float | None = None  # ts is local availability when captured
 
     @property
     def mid(self) -> float:
@@ -102,6 +104,7 @@ class Backtest:
         decision_log_path: str | None = None,
         decision_interval_s: float | None = None,
         quote_refresh_s: float | None = None,
+        flatten_at_end: bool = False,
     ):
         if decision_interval_s is not None and decision_interval_s <= 0:
             raise ValueError("decision_interval_s must be positive")
@@ -111,6 +114,7 @@ class Backtest:
         self.start_equity = start_equity
         self._decision_interval_s = decision_interval_s
         self._quote_refresh_s = quote_refresh_s
+        self._flatten_at_end = flatten_at_end
         self._trades: list[Backtrade] = []
         self._funding_events: list = []
         self._snapshots: list[MarketSnapshot] = []
@@ -159,9 +163,15 @@ class Backtest:
 
     def _fill_rule(self, ts: float, trade: Backtrade) -> list[BacktestFill]:
         """A resting order fills when a trade prints through its price."""
+        trade = dataclasses.replace(trade)  # never consume the input capture
         filled: list[BacktestFill] = []
         remaining = []
         for order in self._resting_orders:
+            if ts >= order.get("cancel_at", float("inf")):
+                continue
+            if ts < order.get("active_at", -float("inf")):
+                remaining.append(order)
+                continue
             if trade.size <= 0:
                 remaining.append(order)
                 continue
@@ -195,6 +205,12 @@ class Backtest:
                 remaining.append(order)
                 continue
 
+            if order.get("reduce_only"):
+                closeable = max(0, self._pnl.position if is_ask_hit else -self._pnl.position)
+                fill_size = min(fill_size, closeable)
+                if fill_size <= 0:
+                    continue
+
             if is_ask_hit:
                 filled.append(BacktestFill(side="ask", price=order["price"], size=fill_size))
                 order["size"] -= fill_size
@@ -219,10 +235,16 @@ class Backtest:
         gamma = self.config.gamma
         kappa = self.config.kappa
 
-        trades_iter = iter(self._trades)
-        funding_iter = iter(self._funding_events)
-        next_trade = next(trades_iter, None)
-        next_funding = next(funding_iter, None)
+        # One chronological stream: a later snapshot in the same control
+        # interval must not become a fill's reference mid (look-ahead).
+        events = sorted(
+            [(b.ts, 0, b) for b in self._books]
+            + [(s.ts, 1, s) for s in self._snapshots]
+            + [(r.ts, 2, r) for r in self._trades]
+            + [(r["ts"], 3, r) for r in self._funding_events],
+            key=lambda item: (item[0], item[1]),
+        )
+        event_index = 0
 
         t0 = self._snapshots[0].ts if self._snapshots else time.time()
         t_end = t0 + duration_s
@@ -237,37 +259,30 @@ class Backtest:
         while t < t_end:
             # Process snapshots up to t
             markout = getattr(self._strategy, "markout", None)
-            while self._books and self._books[0].ts <= t:
-                self._current_book = self._books.pop(0)
-            while self._snapshots and self._snapshots[0].ts <= t:
-                snap = self._snapshots.pop(0)
-                self._mid_history.append((snap.ts, snap.mid))
-                if markout is not None:
-                    markout.on_mid(snap.ts, snap.mid)
-
             mid = self._mid_history[-1][1] if self._mid_history else 0.0
-
-            # Process trades — booked through the shared ledger so realized/
-            # unrealized/spread/markout are the same math the live keeper uses
-            while next_trade and next_trade.ts <= t:
-                for fill in self._fill_rule(t, next_trade):
-                    self._fills.append(fill)
-                    side = "sell" if fill.side == "ask" else "buy"
-                    self._pnl.on_fill(Fill(ts=t, side=side, price=fill.price,
-                                            size=fill.size, mid_at_fill=mid))
+            while event_index < len(events) and events[event_index][0] <= t:
+                event_ts, kind, event = events[event_index]
+                event_index += 1
+                if kind == 0:
+                    self._current_book = event
+                elif kind == 1:
+                    mid = event.mid
+                    self._mid_history.append((event.ts, mid))
                     if markout is not None:
-                        markout.on_fill(t, side, fill.price, fill.size)
-
-                next_trade = next(trades_iter, None)
+                        markout.on_mid(event.ts, mid)
+                elif kind == 2:
+                    for fill in self._fill_rule(event_ts, event):
+                        self._fills.append(fill)
+                        side = "sell" if fill.side == "ask" else "buy"
+                        fee = fill.price * fill.size * self.config.maker_fee_bps / 1e4
+                        self._pnl.on_fill(Fill(ts=event_ts, side=side, price=fill.price,
+                                              size=fill.size, fee=fee, mid_at_fill=mid, label="maker"))
+                        if markout is not None:
+                            markout.on_fill(event_ts, side, fill.price, fill.size)
+                else:
+                    self._pnl.on_funding(event_ts, event.get("rate", 0.0), mid)
             self._inventory.position = self._pnl.position
-
-            # Process funding (longs pay when rate is positive) — these are
-            # discrete scheduled payments, not a continuously-quoted rate,
-            # so each one applies in full (dt=None) rather than pro-rata.
-            while next_funding and next_funding.get("ts", 0) <= t:
-                fr = next_funding.get("rate", 0.0)
-                self._pnl.on_funding(t, fr, mid)
-                next_funding = next(funding_iter, None)
+            self._resting_orders = [o for o in self._resting_orders if t < o.get("cancel_at", float("inf"))]
 
             self._pnl.mark(t, mid)
             self._equity = self.start_equity + self._pnl.explain(t, mid, include_events=False).total_pnl
@@ -313,9 +328,33 @@ class Backtest:
                             if getattr(intent.quote, f"{side}_price") is not None
                             and getattr(intent.quote, f"{side}_size") > 0
                         ]
-                        if (len(self._resting_orders) != len(desired)
-                                or t - last_quote_ts >= quote_refresh_s):
-                            self._resting_orders = []
+                        if self._current_book:
+                            buffer = self.config.quote_post_only_buffer_bps / 1e4
+                            desired = [(side, min(price, self._current_book.bids[0][0] * (1 - buffer))
+                                        if side == "bid" else max(price, self._current_book.asks[0][0] * (1 + buffer)), size)
+                                       for side, price, size in desired]
+                        desired = [(side, price, size) for side, price, size in desired
+                                   if price * size >= self.config.min_quote_notional]
+                        if (self.config.max_market_data_age_s is not None
+                                and t - self._mid_history[-1][0] > self.config.max_market_data_age_s):
+                            desired = []
+                        desired_by_side = {side: (price, size) for side, price, size in desired}
+                        needs_refresh = len(self._resting_orders) != len(desired)
+                        for order in self._resting_orders:
+                            wanted = desired_by_side.get(order["side"])
+                            needs_refresh |= wanted is None or (wanted is not None and (
+                                order["size"] > wanted[1] + 1e-12 or quote_refresh_reason(
+                                    side="buy" if order["side"] == "bid" else "sell",
+                                    price=order["price"], desired_price=wanted[0], mid=mid,
+                                    age_s=t - last_quote_ts, max_age_s=quote_refresh_s,
+                                    reprice_bps=self.config.quote_reprice_bps,
+                                    min_edge_bps=self.config.maker_fee_bps + self.config.min_edge_bps,
+                                ) is not None))
+                        if needs_refresh:
+                            for order in self._resting_orders:
+                                order.setdefault("cancel_at", t + self.config.cancel_latency_s)
+                            self._resting_orders = [o for o in self._resting_orders if t < o.get("cancel_at", float("inf"))]
+                        if not self._resting_orders:
                             last_quote_ts = t
                             for side, price, size in desired:
                                 self._resting_orders.append(
@@ -324,17 +363,33 @@ class Backtest:
                                         "price": price,
                                         "size": size,
                                         "queue_ahead": self._visible_queue(side, price),
+                                        "active_at": t + self.config.place_latency_s,
+                                        "reduce_only": ((intent.current_inventory or 0) > 0 and side == "ask")
+                                                       or ((intent.current_inventory or 0) < 0 and side == "bid"),
                                     })
                     elif intent:
-                        self._resting_orders = []
-                        self._execute_close(t, mid, intent)
+                        for order in self._resting_orders:
+                            order.setdefault("cancel_at", t + self.config.cancel_latency_s)
+                        self._resting_orders = [o for o in self._resting_orders if t < o.get("cancel_at", float("inf"))]
+                        if not self._resting_orders:
+                            self._execute_close(t, mid, intent)
 
+            self._pnl.mark(t, mid)
+            self._equity = self.start_equity + self._pnl.explain(t, mid, include_events=False).total_pnl
             self._history.append({
                 "ts": t, "mid": mid, "equity": self._equity,
                 "position": self._inventory.position,
             })
             t += tick_s
 
+        if self._flatten_at_end and self._history:
+            # Terminal liquidation cost, not an extra simulated trading period.
+            self._resting_orders = []
+            self._execute_close(t, mid, ExecIntent(venue=self.config.exchange,
+                                coin=coin, target_inventory=0.0, urgency="terminal"))
+            self._pnl.mark(t, mid)
+            self._equity = self.start_equity + self._pnl.explain(t, mid, include_events=False).total_pnl
+            self._history.append(dict(ts=t, mid=mid, equity=self._equity, position=self._inventory.position))
         if self._decision_log is not None:
             self._decision_log.close()
             self._decision_log = None
@@ -342,17 +397,19 @@ class Backtest:
         return self._history
 
     def _execute_close(self, t: float, mid: float, intent: ExecIntent) -> None:
-        """Quote-less intents (stop_quoting / de_risk / emergency_exit): OPMS
-        works the position to target_inventory. Filled at once, at mid.
+        """Charge touch crossing, taker fee and configured additional slippage.
 
-        ponytail: instant mid fill, no taker fee/slippage — optimistic; add a
-        taker cost once OPMS close fills are measured.
+        ponytail: no full depth/market-impact model; micro-size replay only.
         """
         gap = intent.target_inventory - self._inventory.position
         if abs(gap) < 1e-12 or mid <= 0:
             return
         side = "buy" if gap > 0 else "sell"
-        self._pnl.on_fill(Fill(ts=t, side=side, price=mid, size=abs(gap),
+        touch = mid if self._current_book is None else (
+            self._current_book.asks[0][0] if gap > 0 else self._current_book.bids[0][0])
+        price = touch * (1 + (1 if gap > 0 else -1) * self.config.close_slippage_bps / 1e4)
+        fee = price * abs(gap) * self.config.taker_fee_bps / 1e4
+        self._pnl.on_fill(Fill(ts=t, side=side, price=price, size=abs(gap), fee=fee,
                                mid_at_fill=mid, label=intent.urgency))
         self._inventory.position = self._pnl.position
 
@@ -403,9 +460,11 @@ class Backtest:
             "markout_pnl": breakdown.markout_pnl,
             "markout_ratio": markout_ratio,
             "funding_pnl": breakdown.funding_pnl,
-            # ponytail: no margin/leverage model in this backtester, so there's
-            # nothing that can liquidate; gate always reads 0 until one exists.
-            "liquidations": 0,
+            "fee_pnl": breakdown.fee_pnl,
+            "liquidations": None,  # not modelled; never claim zero observed liquidations
+            "max_initial_margin_fraction": max((abs(h["position"]) * h["mid"] /
+                (self.config.leverage * h["equity"]) if h["equity"] > 0 else float("inf")
+                for h in self._history), default=0.0),
         }
 
     def gate_report(self) -> dict:
@@ -415,7 +474,7 @@ class Backtest:
             "net_edge_bps": (m["net_edge_bps"] > GATE_MIN_NET_EDGE_BPS, m["net_edge_bps"], GATE_MIN_NET_EDGE_BPS),
             "markout_ratio": (m["markout_ratio"] < GATE_MAX_MARKOUT_RATIO, m["markout_ratio"], GATE_MAX_MARKOUT_RATIO),
             "max_drawdown": (m["max_drawdown"] < GATE_MAX_DRAWDOWN, m["max_drawdown"], GATE_MAX_DRAWDOWN),
-            "liquidations": (m["liquidations"] == 0, m["liquidations"], 0),
+            "initial_margin": (m["max_initial_margin_fraction"] < .5, m["max_initial_margin_fraction"], .5),
         }
         return {
             "passed": all(passed for passed, _, _ in checks.values()),

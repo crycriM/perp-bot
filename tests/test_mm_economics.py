@@ -48,7 +48,7 @@ def test_replay_books_fill_at_event_time_without_future_mid_and_with_fees():
     asyncio.run(bt.run(duration_s=2, tick_s=1))
     result = bt.pnl_explain()
     assert result.spread_capture == pytest.approx(1)
-    assert result.fees == pytest.approx(-.0198)
+    assert result.fee_pnl == pytest.approx(-.0198)
 
 
 def test_cancel_latency_keeps_order_exposed_until_ack_and_no_input_mutation():

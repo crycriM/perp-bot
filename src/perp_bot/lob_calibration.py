@@ -21,7 +21,7 @@ def _slice_passes(metrics: dict, min_fills: int) -> bool:
         metrics["net_edge_bps"] > GATE_MIN_NET_EDGE_BPS
         and metrics["markout_ratio"] < GATE_MAX_MARKOUT_RATIO
         and metrics["max_drawdown"] < GATE_MAX_DRAWDOWN
-        and metrics["liquidations"] == 0
+        and metrics.get("max_initial_margin_fraction", float("inf")) < .5
         and metrics["n_fills"] >= min_fills
     )
 
@@ -54,6 +54,9 @@ async def replay_candidate(
     decision_interval_s: float,
     quote_refresh_s: float,
     max_position_multiple: float,
+    policy: dict | None = None,
+    funding: list | None = None,
+    flatten_at_end: bool = True,
 ) -> dict:
     if not data.books:
         raise ValueError(f"no L2 books available for {coin}")
@@ -65,12 +68,14 @@ async def replay_candidate(
         quote_size=quote_size,
         price_tick=price_tick,
         caps=Caps(max_position=max_position, critical_position=max_position * 2.0),
+        **(policy or {}),
     )
     backtest = Backtest(
         config,
         start_equity=start_equity,
         decision_interval_s=decision_interval_s,
         quote_refresh_s=quote_refresh_s,
+        flatten_at_end=flatten_at_end,
     )
     backtest.set_strategy(Strategy(config))
     for book in data.books:
@@ -80,7 +85,7 @@ async def replay_candidate(
         Backtrade(trade.ts, trade.side, trade.price, trade.size)
         for trade in data.trades
     ])
-    backtest.load_funding([])
+    backtest.load_funding([f for f in (funding or []) if data.books[0].ts <= f["ts"] <= data.books[-1].ts])
     duration_s = data.books[-1].ts - data.books[0].ts + tick_s
     await backtest.run(duration_s=duration_s, tick_s=tick_s)
     return backtest.metrics()

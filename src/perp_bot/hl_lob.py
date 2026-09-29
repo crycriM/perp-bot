@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,8 +62,15 @@ def load_lob_capture(path: Path, coin: str) -> LobReplayData:
                     continue
                 bids = tuple((float(level["px"]), float(level["sz"])) for level in levels[0])
                 asks = tuple((float(level["px"]), float(level["sz"])) for level in levels[1])
-                books.append(BacktestBook(ts=float(data["time"]) / 1000.0,
-                                          bids=bids, asks=asks))
+                if (any(not math.isfinite(p) or not math.isfinite(s) or p <= 0 or s <= 0 for p, s in bids + asks)
+                        or bids[0][0] >= asks[0][0]
+                        or list(bids) != sorted(bids, reverse=True) or list(asks) != sorted(asks)):
+                    raise ValueError(f"invalid/crossed/unsorted book for {coin}")
+                exchange_ts = float(data["time"]) / 1000.0
+                received = record.get("received_at_ms")
+                books.append(BacktestBook(ts=max(exchange_ts, float(received) / 1000) if received else exchange_ts,
+                                          bids=bids, asks=asks,
+                                          exchange_ts=exchange_ts if received else None))
             elif channel == "trades" and isinstance(data, list):
                 for row in data:
                     if row.get("coin") != coin or row.get("side") not in {"A", "B"}:

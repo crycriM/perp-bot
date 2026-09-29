@@ -546,3 +546,21 @@ async def test_keeper_reconciles_pnl_ledger_position_on_drift():
     assert keeper._pnl.position == pytest.approx(3.0)
     b = keeper.pnl_explain()
     assert any(f.label == "reconcile" for f in b.fills)
+
+
+def test_widen_size_keeps_venue_minimum_notional():
+    config = PerpPairConfig(
+        coin="ENA", quote_size=39.0, price_tick=0.00001, min_quote_notional=10.0,
+        caps=Caps(max_position=195.0, critical_position=390.0),
+    )
+    hist = [(0.0, 0.26), (900.0, 0.26), (1800.0, 0.26)]
+    q = build_intent(
+        config, Decision.WIDEN, "passive", 0.26, 0.0, hist, config.caps.max_position,
+    ).quote
+    assert q.bid_size * 0.26 >= 10.0  # was 19.5 ENA (~$5): silently dropped
+    assert q.bid_size <= 39.0
+    config.min_quote_notional = 0.0
+    q = build_intent(
+        config, Decision.WIDEN, "passive", 0.26, 0.0, hist, config.caps.max_position,
+    ).quote
+    assert q.bid_size == 19.5
