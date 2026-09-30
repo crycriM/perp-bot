@@ -14,6 +14,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import math
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -104,12 +105,6 @@ class BasketRebalancer:
             coin_net[cfg.coin] += position
         return dict(coin_net)
 
-    def _find_config(self, account_id: str, coin: str) -> PerpPairConfig | None:
-        for cfg in self.configs:
-            if cfg.account_id == account_id and cfg.coin == coin:
-                return cfg
-        return None
-
     async def rebalance_cycle(self) -> list[RebalanceRecord]:
         records: list[RebalanceRecord] = []
         ts = time.time()
@@ -125,9 +120,13 @@ class BasketRebalancer:
             equity = 0.0
             gross = 0.0
             projected_initial_margin = 0.0
+            bad_input: str | None = None
             for cfg in cfgs:
                 position, acct_equity = await self.position_provider(account_id, cfg.coin)
                 price = await self.price_provider(cfg.coin)
+                if not all(math.isfinite(x) for x in (position, acct_equity, price)) or price <= 0:
+                    bad_input = f"{cfg.coin}: position={position} equity={acct_equity} price={price}"
+                    break
                 equity = acct_equity
                 gross += abs(position) * price
                 leverage = max(float(getattr(cfg, "leverage", 1)), 1.0)
@@ -136,6 +135,12 @@ class BasketRebalancer:
                 imbalance += drift * price
                 if abs(drift * price) >= 1e-6:
                     book.append((cfg, position, price, drift))
+
+            if bad_input:
+                # A leg with no usable price/position drops out of the imbalance sum, so a
+                # correction sized from the remaining legs would be wrong: skip the account.
+                logger.error(f"{account_id}: rebalance skipped, unusable provider data ({bad_input})")
+                continue
 
             imbalance_pct = abs(imbalance) / equity if equity > 0 else 0.0
             if imbalance_pct <= self.cfg.imbalance_pct_threshold:
@@ -237,8 +242,8 @@ class BasketRebalancer:
         while self._running:
             try:
                 await self.rebalance_cycle()
-            except Exception as e:
-                logger.error(f"Rebalance cycle error: {e}")
+            except Exception:
+                logger.exception("Rebalance cycle error")
             await asyncio.sleep(self.cfg.cycle_interval_s)
 
 

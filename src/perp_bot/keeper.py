@@ -12,7 +12,7 @@ from mm_core.contracts import ExecIntent, MarketSnapshot, QuoteSpec
 from mm_core.inventory import PerpInventory
 from mm_core.markout import MarkoutTracker
 from mm_core.pnl import Fill, PnLLedger
-from mm_core.risk_policy import Decision, RiskPolicy
+from mm_core.risk_policy import Decision, RiskPolicy, URGENCY
 from mm_core.regime import evaluate_regime
 from mm_core.as_core import gueant_quote_prices, glft_quote_prices
 from mm_core.vol import VOLATILITY_MODELS
@@ -24,6 +24,7 @@ from perp_bot.opms_client import OpmsClient
 logger = logging.getLogger(__name__)
 
 MID_HISTORY_LEN = 200  # regime/vol window; the backtest slices to the same length
+MAX_TICK_ERRORS = 5  # consecutive failed ticks before resting quotes are pulled
 
 
 def _quote_price(
@@ -87,12 +88,19 @@ class Keeper:
         self._mid_history: deque = deque(maxlen=MID_HISTORY_LEN)
         self._running = False
         self._last_funding_ts: float | None = None
+        self._last_md_rx = time.monotonic()  # local receipt time of the last usable snapshot
+        self._tick_errors = 0
+        self._last_decision: Decision | None = None
         # JSON-lines decision record — the shadow-mode artifact
         self._decision_log = open(decision_log_path, "a") if decision_log_path else None
 
     async def _on_snapshot(self, data):
         ts = data.get("ts", time.time())
-        mid = data.get("mid", 0.0)
+        mid = data.get("mid")
+        if not (isinstance(mid, (int, float)) and math.isfinite(mid) and mid > 0):
+            logger.warning(f"Dropping snapshot with unusable mid={mid!r}")
+            return
+        self._last_md_rx = time.monotonic()
         self._mid_history.append((ts, mid))
         self._markout.on_mid(ts, mid)
         self._pnl.mark(ts, mid)
@@ -112,10 +120,17 @@ class Keeper:
 
     async def _on_fill(self, data):
         ts = data.get("ts", time.time())
-        side = data.get("side", "buy")
-        price = data.get("price", 0.0)
-        size = data.get("size", 0.0)
+        side = data.get("side")
+        price = data.get("price")
+        size = data.get("size")
         fee = data.get("fee", 0.0)
+        # Position is re-read from OPMS every tick, so dropping a bad fill is safe;
+        # guessing its side/price/size is not.
+        if (side not in ("buy", "sell")
+                or not all(isinstance(x, (int, float)) and math.isfinite(x) for x in (price, size, fee))
+                or price <= 0 or size <= 0):
+            logger.error(f"Dropping malformed fill: {data!r}")
+            return
         mid_at_fill = self._mid_history[-1][1] if self._mid_history else price
         self._markout.on_fill(ts, side, price, size)
         self._pnl.on_fill(Fill(ts=ts, side=side, price=price, size=size,
@@ -222,8 +237,21 @@ class Keeper:
                 margin_available=self._margin_available,
             )
             gate = self._risk.last_regime_gate
+            reason = self._risk.last_reason
+
+            # Same gate as the backtest/HB controller: quotes priced off a stale mid are
+            # free options for the market. Cancel-only (target = current, no flatten).
+            stale_s = time.monotonic() - self._last_md_rx
+            max_age = self.config.max_market_data_age_s
+            stale = (max_age is not None and stale_s > max_age
+                     and decision in (Decision.QUOTE, Decision.WIDEN))
+            if stale:
+                decision, urgency = Decision.STOP_QUOTING, URGENCY[Decision.STOP_QUOTING]
+                reason = f"stale market data {stale_s:.1f}s > {max_age}s"
 
             intent = self._actuate(decision, urgency, ts, mid, regime)
+            if stale and intent is not None:
+                intent = dataclasses.replace(intent, target_inventory=self._inventory.position)
             if self.intent_transform is not None:
                 intent = self.intent_transform(decision, intent, self._inventory.position, mid)
             intent_sent = False
@@ -258,13 +286,40 @@ class Keeper:
                 regime_history_span_s=regime.history_span_s,
             )
             self._log_decision(record)
-            logger.info(
-                f"tick t={ts:.0f} mid={mid:.2f} reg={record.regime} "
-                f"dec={decision.value} urg={urgency} inv={self._inventory.position:.2f} "
-                f"eq={self._equity:.2f}"
+            # Decision changes are the audit trail: log them in full. Steady ticks stay at DEBUG
+            # (the JSONL decision log already has every one).
+            changed = decision is not self._last_decision
+            self._last_decision = decision
+            logger.log(
+                logging.WARNING if changed and decision is not Decision.QUOTE else
+                logging.INFO if changed else logging.DEBUG,
+                f"tick t={ts:.0f} mid={mid:.2f} dec={decision.value} urg={urgency} "
+                f"reason=[{reason}] inv={self._inventory.position:.4g} eq={self._equity:.2f} "
+                f"margin={self._margin_available} regime={record.regime}/{record.regime_state}"
+                f"{' (changed)' if changed else ''}"
             )
-        except Exception as e:
-            logger.error(f"Tick error: {e}")
+            self._tick_errors = 0
+        except Exception:
+            self._tick_errors += 1
+            logger.exception(f"Tick error ({self._tick_errors} consecutive)")
+            if self._tick_errors % MAX_TICK_ERRORS == 0:
+                await self._pull_quotes()
+
+    async def _pull_quotes(self) -> None:
+        """Best-effort cancel-only intent: a tick that keeps failing must not leave quotes
+        resting at prices nobody is updating any more."""
+        logger.critical(f"{MAX_TICK_ERRORS} consecutive tick errors — pulling resting quotes")
+        cfg, pos = self.config, self._inventory.position
+        if self.shadow_mode:
+            return
+        try:
+            await self.client.send_intent(ExecIntent(
+                venue=cfg.exchange, coin=cfg.coin, account_id=cfg.account_id,
+                target_inventory=pos, current_inventory=pos, quote=None,
+                urgency="immediate", strategy_hint="passive_aggressive",
+            ))
+        except Exception:
+            logger.exception("Could not send quote-pull intent")
 
     def _log_decision(self, record: DecisionRecord) -> None:
         """Append the per-cycle decision record as a JSON line (shadow artifact)."""

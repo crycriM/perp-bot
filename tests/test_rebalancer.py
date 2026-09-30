@@ -328,3 +328,22 @@ async def test_capacity_guard_allows_de_risking_an_overshot_book():
     assert eth.hedge_side == "sell"
     assert eth.hedge_size == pytest.approx(6.0)
     assert len([i for i in sent if i.account_id == "basket_a"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_rebalance_skips_account_with_unusable_provider_data():
+    cfgs = [PerpPairConfig(coin="BTC", account_id="a", target_inventory=1.0),
+            PerpPairConfig(coin="ETH", account_id="a", target_inventory=-1.0)]
+    sent = []
+
+    async def positions(account, coin):
+        return 5.0, 1000.0
+
+    async def prices(coin):
+        return float("nan") if coin == "ETH" else 100.0
+
+    async def sender(intent):
+        sent.append(intent)
+
+    rebalancer = BasketRebalancer(cfgs, positions, prices, sender)
+    assert await rebalancer.rebalance_cycle() == [] and sent == []

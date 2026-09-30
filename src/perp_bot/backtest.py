@@ -123,14 +123,12 @@ class Backtest:
         self._current_book: BacktestBook | None = None
         self._fills: list[BacktestFill] = []
         self._history: list = []
-        self._strategies: dict[str, Callable] = {}
         self._equity = start_equity
         self._pnl = PnLLedger(venue=getattr(config, "exchange", "hyperliquid"), symbol=config.coin)
         self._inventory = PerpInventory(position=0.0, _caps=config.caps)
         self._mid_history: list[tuple] = []
         self._resting_orders: list[dict] = []
         self._strategy = None
-        self._baseline_spread: float = 50.0
         self._decision_log = open(decision_log_path, "a") if decision_log_path else None
 
     def load_trades(self, trades: list[Backtrade]):
@@ -141,9 +139,6 @@ class Backtest:
 
     def set_strategy(self, strategy: Callable):
         self._strategy = strategy
-
-    def set_baseline(self, baseline: Callable):
-        self._strategies["baseline"] = baseline
 
     def add_snapshot(self, snapshot: MarketSnapshot):
         self._snapshots.append(snapshot)

@@ -564,3 +564,50 @@ def test_widen_size_keeps_venue_minimum_notional():
         config, Decision.WIDEN, "passive", 0.26, 0.0, hist, config.caps.max_position,
     ).quote
     assert q.bid_size == 19.5
+
+
+@pytest.mark.asyncio
+async def test_keeper_drops_unusable_mid_and_malformed_fill():
+    client = FakeOpmsClient(snapshots(drift=10.0))
+    keeper = make_keeper(client)
+    await client.start()
+    n = len(keeper._mid_history)
+    for bad in ({"ts": 1.0}, {"ts": 1.0, "mid": 0.0}, {"ts": 1.0, "mid": float("nan")}):
+        await keeper._on_snapshot(bad)
+    assert len(keeper._mid_history) == n  # nothing poisoned the history
+
+    for bad in ({"side": None, "price": 1.0, "size": 1.0}, {"side": "buy", "price": 0.0, "size": 1.0},
+                {"side": "buy", "price": 1.0, "size": float("nan")}, {"price": 1.0, "size": 1.0}):
+        await keeper._on_fill({"ts": 1.0, **bad})
+    assert keeper._inventory.position == 0 and not keeper._pnl.fills
+
+
+@pytest.mark.asyncio
+async def test_keeper_stale_market_data_pulls_quotes_without_flattening():
+    client = FakeOpmsClient(snapshots(drift=10.0))
+    client.position = 2.0
+    keeper = make_keeper(client, PerpPairConfig(coin="BTC", gamma=1.0, kappa=0.5, max_market_data_age_s=2.0))
+    await client.start()
+    await keeper._tick()
+    assert client.sends[-1].quote is not None  # fresh data -> quotes
+
+    keeper._last_md_rx -= 60  # feed went silent
+    await keeper._tick()
+    stale = client.sends[-1]
+    assert stale.quote is None and stale.target_inventory == 2.0 == stale.current_inventory
+
+
+@pytest.mark.asyncio
+async def test_keeper_pulls_quotes_after_repeated_tick_errors():
+    from perp_bot.keeper import MAX_TICK_ERRORS
+
+    client = FakeOpmsClient(snapshots(drift=10.0))
+    keeper = make_keeper(client)
+    await client.start()
+
+    async def boom():
+        raise RuntimeError("opms down")
+    client.get_positions = boom
+    for _ in range(MAX_TICK_ERRORS):
+        await keeper._tick()
+    assert len(client.sends) == 1 and client.sends[0].quote is None

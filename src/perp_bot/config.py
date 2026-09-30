@@ -68,6 +68,9 @@ class PerpPairConfig:
             )
         if self.caps is None:
             self.caps = Caps(max_position=10.0, critical_position=20.0)
+        if not (math.isfinite(self.caps.max_position) and 0 < self.caps.max_position
+                <= self.caps.critical_position < math.inf):
+            raise ValueError("caps must satisfy 0 < max_position <= critical_position (finite)")
         if self.quote_size is not None and self.quote_size <= 0:
             raise ValueError("quote_size must be positive")
         if self.price_tick is not None and self.price_tick <= 0:

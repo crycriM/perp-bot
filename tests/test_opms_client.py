@@ -320,3 +320,72 @@ class _AsyncIter:
         if not self._items:
             raise StopAsyncIteration
         return self._items.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_send_intent_refuses_invalid_intent_and_http_errors():
+    from mm_core.contracts import ExecIntent, QuoteSpec
+
+    client = make_client()
+    mock_session = AsyncMock()
+    mock_session.closed = False
+    mock_session.post = lambda url, json=None: json_response({"detail": "nope"}, status=422)
+    client._session = mock_session
+
+    crossed = ExecIntent("hl", "BTC", 0.0, QuoteSpec(2.0, 1.0, 1.0, 1.0))
+    with pytest.raises(ValueError, match="quote_crossed"):
+        await client.send_intent(crossed)
+    ok = ExecIntent("hl", "BTC", 0.0, QuoteSpec(1.0, 2.0, 1.0, 1.0))
+    with pytest.raises(RuntimeError, match="422"):
+        await client.send_intent(ok)
+
+
+@pytest.mark.asyncio
+async def test_get_positions_rejects_unknown_side():
+    client = make_client()
+    mock_session = AsyncMock()
+    mock_session.closed = False
+    mock_session.get = lambda url: (
+        json_response({"equity": "500.0"}) if "equity" in url else
+        json_response({"side": "LONG", "quantity": "2.0", "margin_available": "400.0"})
+    )
+    client._session = mock_session
+    with pytest.raises(ValueError, match="malformed OPMS position"):
+        await client.get_positions()
+
+
+@pytest.mark.asyncio
+async def test_ws_loop_survives_bad_message_and_callback_error():
+    client = make_client()
+    received = []
+
+    async def on_snapshot(data):
+        if data.get("boom"):
+            raise RuntimeError("callback bug")
+        received.append(data)
+    client.on_snapshot(on_snapshot)
+
+    def text(payload):
+        m = MagicMock(type=aiohttp.WSMsgType.TEXT)
+        m.json.return_value = payload
+        return m
+    bad_json = MagicMock(type=aiohttp.WSMsgType.TEXT)
+    bad_json.json.side_effect = ValueError("not json")
+    msgs = [bad_json, text({"type": "market_data", "data": {"boom": 1}}),
+            text({"type": "market_data", "data": {"mid": 5.0}}), MagicMock(type=aiohttp.WSMsgType.CLOSED)]
+
+    ws_cm = MagicMock()
+    ws_cm.__aenter__ = AsyncMock(return_value=_AsyncIter(msgs))
+    ws_cm.__aexit__ = AsyncMock(return_value=False)
+    mock_session = AsyncMock()
+    mock_session.closed = False
+    mock_session.ws_connect = lambda url: ws_cm
+    client._session = mock_session
+
+    task = asyncio.create_task(client._md_ws_loop())
+    await asyncio.sleep(0.05)
+    assert not task.done()  # the loop is alive and past both bad messages
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert received == [{"mid": 5.0}]
