@@ -50,6 +50,7 @@ def get_basket_configs() -> list[PerpPairConfig]:
             kappa=eth_kappa,
             target_inventory=eth_q_star,
             leverage=basket_leverage,
+            max_market_data_age_s=15.0,
             caps=Caps(max_position=eth_max_pos, critical_position=eth_critical),
         ),
         PerpPairConfig(
@@ -60,6 +61,7 @@ def get_basket_configs() -> list[PerpPairConfig]:
             kappa=sol_kappa,
             target_inventory=-sol_q_star,
             leverage=basket_leverage,
+            max_market_data_age_s=15.0,
             caps=Caps(max_position=sol_max_pos, critical_position=sol_critical),
         ),
         # Sub B: ETH short tilt, SOL long tilt (mirror)
@@ -71,6 +73,7 @@ def get_basket_configs() -> list[PerpPairConfig]:
             kappa=eth_kappa,
             target_inventory=-eth_q_star,
             leverage=basket_leverage,
+            max_market_data_age_s=15.0,
             caps=Caps(max_position=eth_max_pos, critical_position=eth_critical),
         ),
         PerpPairConfig(
@@ -81,6 +84,7 @@ def get_basket_configs() -> list[PerpPairConfig]:
             kappa=sol_kappa,
             target_inventory=sol_q_star,
             leverage=basket_leverage,
+            max_market_data_age_s=15.0,
             caps=Caps(max_position=sol_max_pos, critical_position=sol_critical),
         ),
     ]

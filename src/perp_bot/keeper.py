@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable
@@ -78,6 +79,8 @@ class Keeper:
         self.config = config
         self.tick_s = tick_s
         self.shadow_mode = shadow_mode
+        if not shadow_mode and config.max_market_data_age_s is None:
+            raise ValueError("max_market_data_age_s is required for a live Keeper")
         self._risk = RiskPolicy(cfg=config.risk)
         self.intent_transform: Callable[[Decision, ExecIntent | None, float, float], ExecIntent | None] | None = None
         self._markout = MarkoutTracker(horizons=(10.0, 30.0, 60.0))
@@ -91,6 +94,8 @@ class Keeper:
         self._last_md_rx = time.monotonic()  # local receipt time of the last usable snapshot
         self._tick_errors = 0
         self._last_decision: Decision | None = None
+        self._execution_intent_signature: tuple | None = None
+        self._execution_intent_id: str | None = None
         # JSON-lines decision record — the shadow-mode artifact
         self._decision_log = open(decision_log_path, "a") if decision_log_path else None
 
@@ -136,6 +141,8 @@ class Keeper:
         self._pnl.on_fill(Fill(ts=ts, side=side, price=price, size=size,
                                 fee=fee, mid_at_fill=mid_at_fill))
         delta = size if side == "buy" else -size
+        # Keep fills reflected between ticks; OPMS resnapshot remains authoritative,
+        # while the HB controller uses this as its last-known fallback on errors.
         self._inventory.position += delta
         logger.info(f"Fill: {side} {size} @ {price}, pos={self._inventory.position}")
 
@@ -254,13 +261,25 @@ class Keeper:
                 intent = dataclasses.replace(intent, target_inventory=self._inventory.position)
             if self.intent_transform is not None:
                 intent = self.intent_transform(decision, intent, self._inventory.position, mid)
+            if intent is not None and intent.quote is None:
+                signature = (decision, intent.target_inventory, intent.urgency, intent.strategy_hint)
+                if signature != self._execution_intent_signature or self._execution_intent_id is None:
+                    self._execution_intent_signature = signature
+                    self._execution_intent_id = f"keeper:{coin}:{uuid.uuid4().hex[:12]}"
+                intent = dataclasses.replace(intent, client_id=self._execution_intent_id)
+            else:
+                self._execution_intent_signature = None
+                self._execution_intent_id = None
             intent_sent = False
             if intent:
                 if self.shadow_mode:
                     logger.info("Shadow mode: logging intent without sending to OPMS")
                 else:
-                    await self.client.send_intent(intent)
+                    response = await self.client.send_intent(intent)
                     intent_sent = True
+                    if (isinstance(response, dict)
+                            and response.get("status") in {"completed", "failed", "cancelled"}):
+                        self._execution_intent_id = None
 
             total_pnl = self._pnl.explain(ts, mid, include_events=False).total_pnl
             record = DecisionRecord(

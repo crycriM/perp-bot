@@ -181,6 +181,7 @@ class BasketRebalancer:
                     self._log_decision(record)
                 continue
 
+            send_failures: list[tuple[str, str]] = []
             for cfg, position, price, drift in book:
                 hedge_size = -drift
                 hedge_side = "buy" if hedge_size > 0 else "sell"
@@ -198,9 +199,6 @@ class BasketRebalancer:
                     client_id=f"rebalance:{account_id}:{cfg.coin}:{ts:.0f}",
                 )
 
-                if not self.shadow_mode:
-                    await self.intent_sender(intent)
-
                 record = RebalanceRecord(
                     ts=ts,
                     account_id=account_id,
@@ -214,10 +212,28 @@ class BasketRebalancer:
                 )
                 records.append(record)
                 self._log_decision(record)
+
+                if not self.shadow_mode:
+                    try:
+                        await self.intent_sender(intent)
+                    except Exception as exc:
+                        send_failures.append((cfg.coin, f"{type(exc).__name__}: {exc}"))
+                        logger.exception("Rebalance intent send failed for %s/%s", account_id, cfg.coin)
+                        continue
+
                 logger.info(
                     f"Rebalance: {account_id}/{cfg.coin} drift={drift:+.4f} "
                     f"hedge={hedge_side} {abs(hedge_size):.4f} "
                     f"imbalance_pct={imbalance_pct:.2%}"
+                )
+
+            if send_failures:
+                # ponytail: OPMS has no atomic multi-leg route; attempt every leg and report partial sends.
+                logger.error(
+                    "Rebalance account=%s intended legs=%s; failed legs=%s",
+                    account_id,
+                    [cfg.coin for cfg, _, _, _ in book],
+                    send_failures,
                 )
 
         portfolio_net = await self.compute_portfolio_net()

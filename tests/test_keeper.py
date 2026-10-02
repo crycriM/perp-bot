@@ -71,6 +71,8 @@ class FakeOpmsClient:
 
 def make_keeper(client, config=None, **kwargs):
     config = config or PerpPairConfig(coin="BTC", gamma=1.0, kappa=0.5)
+    if config.max_market_data_age_s is None and not kwargs.get("shadow_mode", False):
+        config.max_market_data_age_s = 15.0
     keeper = Keeper(client, config, tick_s=0.01, **kwargs)
     client.on_snapshot(keeper._on_snapshot)
     client.on_fill(keeper._on_fill)

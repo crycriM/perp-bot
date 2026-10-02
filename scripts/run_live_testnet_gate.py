@@ -172,6 +172,7 @@ async def main():
         pair_config = PerpPairConfig(
             coin=COIN,
             gamma=0.5, kappa=0.3, widen_factor=2.0,
+            max_market_data_age_s=15.0,
             exchange=EXCHANGE, account_id=ACCOUNT_ID,
         )
         pair_config.caps.max_position = CAPS_MAX_POSITION

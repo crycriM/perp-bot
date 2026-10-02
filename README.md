@@ -229,6 +229,7 @@ logging.basicConfig(level=logging.INFO)  # perp_bot uses stdlib logging and
 config = PerpPairConfig(
     coin="ETH", exchange="hyperliquid", account_id="test",
     gamma=0.25, kappa=0.5,             # calibrated in step 1
+    max_market_data_age_s=15.0,
     caps=Caps(max_position=0.05, critical_position=0.1),
 )
 validate_account_topology([config])
