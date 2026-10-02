@@ -444,6 +444,21 @@ async def test_keeper_on_error_survives_resnapshot_failure():
 
 
 @pytest.mark.asyncio
+async def test_keeper_nan_equity_stops_quoting_and_logs(tmp_path):
+    """Producers signal "no equity reading" as NaN: cancel quotes, don't crash the tick or the log."""
+    log_path = tmp_path / "decisions.jsonl"
+    client = FakeOpmsClient(snapshots(drift=10.0), equity=float("nan"), margin_available=100.0)
+    keeper = make_keeper(client, decision_log_path=str(log_path))
+    await client.start()
+
+    await keeper._tick()
+    await keeper.stop()
+
+    assert keeper._last_decision is Decision.STOP_QUOTING
+    assert json.loads(log_path.read_text().splitlines()[0])["decision"] == "stop_quoting"
+
+
+@pytest.mark.asyncio
 async def test_keeper_writes_jsonl_decision_log(tmp_path):
     """Every tick appends one parseable JSON line — the shadow artifact."""
     log_path = tmp_path / "decisions.jsonl"
