@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from capture_lighter_lob import (
     parse_order_book_message,
+    resolve_markets,
     rest_trades_to_events,
 )
 
@@ -35,6 +36,14 @@ class TestOrderBookParser:
 
     def test_ignores_unknown_channel(self):
         assert parse_order_book_message({"channel": "connected"}) is None
+
+
+def test_resolve_markets_includes_rwa_symbols_and_normalizes_names():
+    assert resolve_markets(("eth", "CRCL", "natgas")) == {
+        "ETH": 0,
+        "CRCL": 121,
+        "NATGAS": 158,
+    }
 
 
 class TestRestTrades:
